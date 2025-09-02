@@ -1,0 +1,283 @@
+# Detaillierter Entwicklungsplan für die Facebook-Beweissicherungs-App
+
+Dieser Plan basiert auf den Diskussionen mit Claude und Qwen und soll als detaillierte Anleitung für die Implementierung der Facebook-Beweissicherungs-App mit Cursor dienen. Er berücksichtigt die empfohlenen Technologien, Architekturen und Best Practices.
+
+## 1. Technologie-Stack
+
+*   **Desktop-App Framework:** Electron
+*   **Frontend Framework:** Next.js (React)
+*   **Browser Automation:** Puppeteer (mit Puppeteer Stealth Plugin)
+*   **Datenbank:** SQLite (lokal)
+*   **Sprache:** TypeScript (für Main und Renderer Process)
+*   **IPC-Kommunikation:** Electron's `ipcMain` und `ipcRenderer` mit TypeScript Interfaces für Typsicherheit.
+*   **Logging:** `winston` oder `electron-log`
+*   **Cookie-Speicherung:** `keytar` oder `safeStorage` von Electron für verschlüsselte Speicherung
+*   **Testing:** Jest (Unit-Tests), Puppeteer (E2E-Tests)
+
+## 2. Architektur-Übersicht
+
+Die Anwendung wird in zwei Hauptprozesse unterteilt:
+
+*   **Main Process (Electron):** Verantwortlich für Backend-Logik, Dateisystemzugriff, Datenbankinteraktionen, Browser-Automatisierung (Screenshots), Cookie-Management und IPC-Kommunikation mit dem Renderer Process.
+*   **Renderer Process (Next.js/React):** Verantwortlich für die Benutzeroberfläche (UI) und die Interaktion mit dem Benutzer. Kommuniziert über IPC mit dem Main Process, um Daten anzufordern oder Aktionen auszulösen.
+
+## 3. Datenbankdesign (SQLite)
+
+Die Datenbank wird lokal mit SQLite implementiert. Das Schema sollte folgende Tabellen umfassen:
+
+*   **`posts` Tabelle:**
+    *   `id` (PRIMARY KEY, TEXT): Eindeutige ID des Facebook-Posts (z.B. aus der URL extrahiert).
+    *   `url` (TEXT): URL des Facebook-Posts.
+    *   `timestamp_captured` (INTEGER): Zeitpunkt der Erfassung des Posts (Unix Timestamp).
+    *   `metadata` (TEXT): JSON-Feld für flexible Metadaten (z.B. Post-Text, Autor, Datum des Posts).
+    *   `checksum_post` (TEXT): SHA256-Hash des Post-Inhalts (falls erfassbar) zur Integritätsprüfung.
+
+*   **`comments` Tabelle:**
+    *   `id` (PRIMARY KEY, TEXT): Eindeutige ID des Kommentars.
+    *   `post_id` (TEXT): FOREIGN KEY zu `posts.id`.
+    *   `url` (TEXT): URL des Kommentars (direkter Link zum Kommentar).
+    *   `timestamp_captured` (INTEGER): Zeitpunkt der Erfassung des Kommentars.
+    *   `screenshot_path` (TEXT): Dateipfad zum zugehörigen Screenshot.
+    *   `metadata` (TEXT): JSON-Feld für flexible Metadaten (z.B. Kommentar-Text, Autor, Datum des Kommentars).
+    *   `checksum_screenshot` (TEXT): SHA256-Hash des Screenshot-Bildes zur Integritätsprüfung.
+    *   `checksum_comment_text` (TEXT): SHA256-Hash des Kommentar-Textes (falls extrahiert).
+
+*   **`sessions` Tabelle (optional, für Multi-Account):**
+    *   `id` (PRIMARY KEY, INTEGER)
+    *   `account_name` (TEXT)
+    *   `cookies` (TEXT, verschlüsselt)
+    *   `profile_path` (TEXT)
+
+**Dateisystem-Struktur für Screenshots:**
+`/screenshots/[post-id]/[comment-id].png`
+
+## 4. Screenshot-System (Hybrid-Lösung mit Puppeteer)
+
+Dies ist die kritischste Komponente. Die Implementierung erfolgt im Main Process.
+
+### 4.1. `BrowserService` Klasse
+
+Eine zentrale Klasse `BrowserService` (oder ähnlich) im Main Process, die die Interaktion mit Puppeteer kapselt:
+
+```typescript
+// main/services/BrowserService.ts
+
+import puppeteer from 'puppeteer-core'; // oder 'puppeteer'
+import { Browser, Page } from 'puppeteer-core';
+import path from 'path';
+import fs from 'fs-extra';
+
+class BrowserService {
+  private browser: Browser | null = null;
+  private profilePath: string;
+  private cookiesPath: string;
+
+  constructor(appDataPath: string) {
+    this.profilePath = path.join(appDataPath, 'browser-profile');
+    this.cookiesPath = path.join(appDataPath, 'cookies.json');
+    fs.ensureDirSync(this.profilePath);
+  }
+
+  async initBrowser(headless: boolean = false): Promise<void> {
+    if (this.browser) return; // Browser already initialized
+
+    this.browser = await puppeteer.launch({
+      executablePath: puppeteer.executablePath(), // Oder Pfad zu Chrome/Edge
+      headless: headless,
+      userDataDir: this.profilePath,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-notifications',
+        '--disable-infobars',
+        '--window-size=1920,1080', // Realistische Viewport-Größe
+      ],
+    });
+
+    await this.loadCookies();
+  }
+
+  async loginToFacebook(): Promise<void> {
+    // Öffnet ein sichtbares Browser-Fenster für den manuellen Login
+    // User wird aufgefordert, sich bei Facebook einzuloggen
+    // Nach erfolgreichem Login: saveCookies() aufrufen
+    // Dies kann eine spezielle UI-Interaktion erfordern, die den Renderer benachrichtigt
+    // und den Browser sichtbar macht.
+    // Beispiel: Öffne eine neue Seite und navigiere zu Facebook Login
+    const page = await this.browser?.newPage();
+    if (page) {
+      await page.goto('https://www.facebook.com/login');
+      // Hier könnte man dem User Anweisungen in der UI geben
+      // und auf ein Signal warten, dass der Login abgeschlossen ist.
+      // Danach saveCookies() aufrufen.
+    }
+  }
+
+  async takeScreenshot(commentUrl: string, postId: string, commentId: string): Promise<string> {
+    if (!this.browser) throw new Error('Browser not initialized.');
+
+    const page = await this.browser.newPage();
+    await page.setViewport({ width: 1920, height: 1080 }); // Oder randomisierte Viewport-Größe
+    // await addExtra(page).use(StealthPlugin()); // Puppeteer Stealth Plugin
+
+    try {
+      await page.goto(commentUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+
+      // Anti-Detection Maßnahmen:
+      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.127 Safari/537.36');
+      await page.mouse.move(Math.random() * 1000, Math.random() * 800); // Simulate mouse movement
+      await page.waitForTimeout(Math.random() * 2000 + 1000); // Random delay
+
+      // Warte auf Kommentar-Element (flexible Selektoren)
+      const commentSelector = 'div[data-commentid="' + commentId + '"]'; // Beispiel-Selektor
+      await page.waitForSelector(commentSelector, { timeout: 30000 });
+      await page.evaluate((selector) => {
+        document.querySelector(selector)?.scrollIntoView();
+      }, commentSelector);
+      await page.waitForTimeout(Math.random() * 3000 + 2000); // Warte auf Content-Laden
+
+      const screenshotDir = path.join(process.env.SCREENSHOTS_DIR || './screenshots', postId);
+      fs.ensureDirSync(screenshotDir);
+      const screenshotPath = path.join(screenshotDir, `${commentId}.png`);
+
+      await page.screenshot({ path: screenshotPath, fullPage: true });
+
+      return screenshotPath;
+    } finally {
+      await page.close();
+    }
+  }
+
+  async saveCookies(): Promise<void> {
+    if (!this.browser) return;
+    const page = await this.browser.newPage();
+    const client = await page.target().createCDPSession();
+    const cookies = (await client.send('Network.getAllCookies')).cookies;
+    // Hier sollten die Cookies verschlüsselt gespeichert werden, z.B. mit keytar
+    // fs.writeFileSync(this.cookiesPath, JSON.stringify(cookies));
+    await page.close();
+  }
+
+  async loadCookies(): Promise<void> {
+    if (!this.browser || !fs.existsSync(this.cookiesPath)) return;
+    // Hier sollten die Cookies entschlüsselt geladen werden
+    // const cookies = JSON.parse(fs.readFileSync(this.cookiesPath, 'utf-8'));
+    // const page = await this.browser.newPage();
+    // await page.setCookie(...cookies);
+    // await page.close();
+  }
+
+  async closeBrowser(): Promise<void> {
+    if (this.browser) {
+      await this.browser.close();
+      this.browser = null;
+    }
+  }
+}
+
+export default BrowserService;
+```
+
+### 4.2. Anti-Detection Maßnahmen
+
+*   **Puppeteer Stealth Plugin:** Unbedingt verwenden, um die Erkennung als Bot zu erschweren.
+*   **Realistische User-Agents:** Regelmäßig aktualisieren und rotieren.
+*   **Viewport-Randomisierung:** Leichte Variationen der Browser-Fenstergröße.
+*   **Maus-/Scroll-Simulation:** Menschliche Interaktionen simulieren, nicht nur warten.
+*   **Random Delays:** Zufällige Pausen zwischen Aktionen (2-5 Sekunden).
+*   **Headful Mode:** Browser im sichtbaren Modus starten, aber minimiert/hidden laufen lassen.
+*   **DevTools deaktivieren:** Verhindert, dass Facebook erkennt, dass DevTools offen sind.
+*   **Cookie-Persistenz:** Session-Cookies verschlüsselt speichern und wiederverwenden.
+*   **Retry mit exponentiellem Backoff:** Bei Fehlern (z.B. Rate Limiting 429) mit zunehmenden Wartezeiten erneut versuchen.
+
+### 4.3. Queue-System für Screenshots
+
+Implementierung einer Warteschlange im Main Process, um die Screenshot-Erstellung zu steuern und Facebooks Rate Limiting zu respektieren.
+
+*   **Worker-Pool:** Begrenzung auf 1-2 parallele Browser-Tabs.
+*   **Pausen:** 3-5 Sekunden Pause zwischen den einzelnen Screenshot-Anfragen.
+*   **Retry-Logik:** Bei Fehlern (z.B. Kommentar nicht gefunden, Netzwerkfehler) automatisch erneut versuchen, mit einer maximalen Anzahl von Retries.
+*   **Progress-Events:** Status-Updates an die UI senden (z.B. 
+
+
+Fortschrittsanzeige, Fehler).
+*   **Error-Log:** Detaillierte Protokollierung fehlgeschlagener Screenshots.
+
+## 5. Implementierungs-Roadmap (Phasen für Cursor)
+
+### Phase 1: Grundgerüst & Setup
+
+*   **Aufgabe 1.1:** Electron-App mit Next.js einrichten.
+    *   Erstelle ein neues Electron-Projekt.
+    *   Integriere Next.js für das Renderer-Prozess-UI.
+    *   Konfiguriere TypeScript für beide Prozesse.
+*   **Aufgabe 1.2:** SQLite-Datenbank initialisieren.
+    *   Richte eine SQLite-Datenbankverbindung im Main Process ein.
+    *   Erstelle die Tabellen `posts` und `comments` (und optional `sessions`) gemäß dem oben beschriebenen Schema.
+*   **Aufgabe 1.3:** Grundlegende IPC-Kommunikation.
+    *   Definiere erste TypeScript Interfaces für IPC-Nachrichten (z.B. zum Abrufen von Daten aus der DB).
+    *   Implementiere eine einfache `ipcRenderer.invoke` / `ipcMain.handle` Schnittstelle.
+*   **Aufgabe 1.4:** JSON-Import-Funktion (Initial).
+    *   Implementiere eine Funktion zum Importieren einer JSON-Datei, die eine Liste von Objekten wie dem bereitgestellten Beispiel enthält. Jedes Objekt sollte mindestens `facebookUrl`, `commentUrl`, `id`, `date`, `text`, `profileName` und `postTitle` enthalten.
+
+### Phase 2: Screenshot-Engine Kern
+
+*   **Aufgabe 2.1:** Puppeteer-Integration.
+    *   Installiere `puppeteer-core` und `puppeteer-extra` mit `puppeteer-extra-plugin-stealth`.
+    *   Implementiere die `BrowserService` Klasse im Main Process (siehe Beispiel oben).
+*   **Aufgabe 2.2:** Facebook-Login & Cookie-Persistenz.
+    *   Implementiere die `loginToFacebook` Methode im `BrowserService`, die ein sichtbares Browser-Fenster öffnet und den Benutzer zum manuellen Login auffordert.
+    *   Implementiere `saveCookies` und `loadCookies` mit verschlüsselter Speicherung (z.B. `keytar`).
+*   **Aufgabe 2.3:** Screenshot-Funktionalität.
+    *   Implementiere die `takeScreenshot` Methode im `BrowserService`.
+    *   Füge grundlegende Anti-Detection-Maßnahmen hinzu (User-Agent, Delays).
+    *   Implementiere flexible Selektoren für Facebook-Kommentare und Fallback-Logik.
+*   **Aufgabe 2.4:** Screenshot-Queue.
+    *   Entwickle ein einfaches Queue-System im Main Process, das `takeScreenshot` asynchron aufruft und die Parallelität begrenzt.
+    *   Integriere eine grundlegende Retry-Logik.
+
+### Phase 3: Benutzeroberfläche (UI) & UX
+
+*   **Aufgabe 3.1:** Post-Übersicht.
+    *   Erstelle eine React-Komponente für die Anzeige aller gespeicherten Posts (Tabelle/Liste).
+    *   Füge Funktionen zum Hinzufügen neuer Posts (via JSON-Import) und zum Löschen hinzu.
+*   **Aufgabe 3.2:** Kommentar-Ansicht.
+    *   Implementiere eine Detailansicht für einen ausgewählten Post, die alle zugehörigen Kommentare anzeigt.
+    *   Füge Filter- und Sortieroptionen hinzu.
+*   **Aufgabe 3.3:** Screenshot-Vorschau & Metadaten.
+    *   Zeige den Screenshot eines Kommentars direkt in der UI an.
+    *   Präsentiere die Metadaten des Kommentars (Autor, Text, Datum).
+*   **Aufgabe 3.4:** Fortschrittsanzeige & Fehlerbehandlung.
+    *   Implementiere Loading-States und Progress-Balken für langlaufende Operationen (z.B. Screenshot-Erstellung).
+    *   Zeige Fehlermeldungen klar und verständlich in der UI an.
+
+### Phase 4: Optimierung, Sicherheit & Qualitätssicherung
+
+*   **Aufgabe 4.1:** Erweiterte Anti-Detection Maßnahmen.
+    *   Integriere das Puppeteer Stealth Plugin vollständig.
+    *   Implementiere Viewport-Randomisierung und Maus-/Scroll-Simulation.
+    *   Verfeinere die Retry-Logik mit exponentiellem Backoff.
+*   **Aufgabe 4.2:** Detailliertes Logging & Audit-Trail.
+    *   Richte ein zentrales Logging-System (z.B. `winston`) ein.
+    *   Protokolliere alle wichtigen Aktionen und Fehler mit Zeitstempel, Fehlercodes und Stacktraces.
+    *   Erstelle einen Audit-Trail für Beweissicherungszwecke.
+*   **Aufgabe 4.3:** Export-Funktionen.
+    *   Implementiere den Export als PDF-Report (mit Metadaten und Screenshots).
+    *   Füge Optionen für den Export von Rohdaten (JSON) hinzu.
+*   **Aufgabe 4.4:** Testbarkeit.
+    *   Schreibe Unit-Tests für die Kernlogik (Datenbank, Queue-System).
+    *   Erwäge E2E-Tests für kritische UI-Flows (z.B. Login, Screenshot-Erstellung).
+*   **Aufgabe 4.5:** Sicherheitsverbesserungen.
+    *   Stelle sicher, dass sensible Daten (Cookies, Credentials) immer verschlüsselt gespeichert werden.
+    *   Implementiere Checksummen (SHA256) für Screenshots und ggf. Kommentar-Texte.
+    *   Füge Datenschutz-Hinweise in der UI hinzu.
+
+## 6. Wichtige Hinweise für Cursor
+
+*   **Iterative Entwicklung:** Gehe die Phasen schrittweise durch. Beginne mit einem minimal funktionsfähigen Produkt und erweitere es dann.
+*   **Facebook-Änderungen:** Sei dir bewusst, dass Facebook seine HTML-Struktur und Anti-Bot-Maßnahmen regelmäßig ändern kann. Dies erfordert möglicherweise Anpassungen an den Selektoren und der Anti-Detection-Strategie.
+*   **Fehlerbehandlung:** Robuste Fehlerbehandlung ist entscheidend, insbesondere bei der Interaktion mit externen Diensten wie Facebook.
+*   **Performance:** Achte auf die Performance, insbesondere bei der Screenshot-Erstellung und der Datenbankinteraktion.
+*   **Benutzerfreundlichkeit:** Die App sollte intuitiv und einfach zu bedienen sein, auch für Benutzer ohne technische Vorkenntnisse.
+
+Dieser Plan bietet eine umfassende Grundlage. Bei der Implementierung können sich weitere Details ergeben, die dann entsprechend angepasst werden müssen. Viel Erfolg bei der Umsetzung!
