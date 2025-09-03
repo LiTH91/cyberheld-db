@@ -44,6 +44,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke(IPC_CHANNELS.OPEN_SCREENSHOT, screenshotPath),
   readScreenshotDataUrl: (screenshotPath) => ipcRenderer.invoke('screenshot:read-dataurl', screenshotPath),
 
+  // Export
+  exportJson: (postId, filePath, commentIds) => ipcRenderer.invoke('export:json', { postId, filePath, commentIds }),
+  exportPdf: (postId, filePath, commentIds) => ipcRenderer.invoke('export:pdf', { postId, filePath, commentIds }),
+
   // Auth helpers
   facebookLogin: () => ipcRenderer.invoke('auth:facebook-login'),
   clearCookies: () => ipcRenderer.invoke('auth:cookies-clear'),

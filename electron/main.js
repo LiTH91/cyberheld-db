@@ -6,6 +6,7 @@ const { BrowserService } = require('./services/BrowserService');
 const { SettingsService } = require('./services/SettingsService');
 const { LoggerService } = require('./services/LoggerService');
 const { AuditService } = require('./services/AuditService');
+const { ExportService } = require('./services/ExportService');
 
 // Fix Windows GPU crashes by disabling hardware acceleration
 // Must be called before app.whenReady()
@@ -33,6 +34,7 @@ class CyberheldApp {
     this.settingsService = new SettingsService();
     this.logger = new LoggerService();
     this.audit = new AuditService();
+    this.exporter = new ExportService();
     this.currentJob = null; // { total, completed, failed, paused, cancelled }
     this.setupApp();
     this.setupIPC();
@@ -323,6 +325,116 @@ class CyberheldApp {
       }
     });
 
+    // Export JSON
+    ipcMain.handle('export:json', async (_evt, { postId, filePath, commentIds }) => {
+      try {
+        const post = (await this.dbService.getPosts()).find((p) => p.id === postId);
+        const all = await this.dbService.getComments(postId);
+        const comments = Array.isArray(commentIds) && commentIds.length
+          ? all.filter((c) => commentIds.includes(c.id))
+          : all;
+
+        // Multi-selection: one JSON per comment
+        if (Array.isArray(commentIds) && commentIds.length > 1 && comments.length > 1) {
+          const dirPick = await dialog.showOpenDialog(this.mainWindow, {
+            title: 'Zielordner für JSON-Export wählen',
+            properties: ['openDirectory', 'createDirectory']
+          });
+          if (dirPick.canceled || dirPick.filePaths.length === 0) return { success: false, cancelled: true };
+          const dir = dirPick.filePaths[0];
+          let ok = 0, fail = 0;
+          for (const c of comments) {
+            const name = buildCommentFilename(c, 'json');
+            const out = path.join(dir, name);
+            try {
+              await this.exporter.exportJson(out, post, [c]);
+              ok++;
+            } catch (err) {
+              fail++;
+            }
+          }
+          this.audit.write('export_json_multi', { postId, dir, ok, fail });
+          return { success: true, ok, fail };
+        }
+
+        // Single file (either one selected comment or full post)
+        let outPath = filePath;
+        if (!outPath) {
+          const defName = (comments.length === 1)
+            ? buildCommentFilename(comments[0], 'json')
+            : buildDefaultFilename(post, 'json');
+          const res = await dialog.showSaveDialog(this.mainWindow, {
+            title: 'Export JSON speichern',
+            defaultPath: defName,
+            filters: [{ name: 'JSON', extensions: ['json'] }]
+          });
+          if (res.canceled) return { success: false, cancelled: true };
+          outPath = res.filePath;
+        }
+        await this.exporter.exportJson(outPath, post, comments);
+        this.audit.write('export_json', { postId, filePath: outPath, count: comments.length });
+        return { success: true };
+      } catch (e) {
+        this.logger.error('Export JSON failed', { error: e?.message || String(e) });
+        return { success: false, error: e?.message || String(e) };
+      }
+    });
+
+    // Export PDF
+    ipcMain.handle('export:pdf', async (_evt, { postId, filePath, commentIds }) => {
+      try {
+        const post = (await this.dbService.getPosts()).find((p) => p.id === postId);
+        const all = await this.dbService.getComments(postId);
+        const comments = Array.isArray(commentIds) && commentIds.length
+          ? all.filter((c) => commentIds.includes(c.id))
+          : all;
+
+        // Multi-selection: one PDF per comment
+        if (Array.isArray(commentIds) && commentIds.length > 1 && comments.length > 1) {
+          const dirPick = await dialog.showOpenDialog(this.mainWindow, {
+            title: 'Zielordner für PDF-Export wählen',
+            properties: ['openDirectory', 'createDirectory']
+          });
+          if (dirPick.canceled || dirPick.filePaths.length === 0) return { success: false, cancelled: true };
+          const dir = dirPick.filePaths[0];
+          let ok = 0, fail = 0;
+          for (const c of comments) {
+            const name = buildCommentFilename(c, 'pdf');
+            const out = path.join(dir, name);
+            try {
+              await this.exporter.exportPdf(out, post, [c]);
+              ok++;
+            } catch (err) {
+              fail++;
+            }
+          }
+          this.audit.write('export_pdf_multi', { postId, dir, ok, fail });
+          return { success: true, ok, fail };
+        }
+
+        // Single file (either one selected comment or full post)
+        let outPath = filePath;
+        if (!outPath) {
+          const defName = (comments.length === 1)
+            ? buildCommentFilename(comments[0], 'pdf')
+            : buildDefaultFilename(post, 'pdf');
+          const res = await dialog.showSaveDialog(this.mainWindow, {
+            title: 'Export PDF speichern',
+            defaultPath: defName,
+            filters: [{ name: 'PDF', extensions: ['pdf'] }]
+          });
+          if (res.canceled) return { success: false, cancelled: true };
+          outPath = res.filePath;
+        }
+        await this.exporter.exportPdf(outPath, post, comments);
+        this.audit.write('export_pdf', { postId, filePath: outPath, count: comments.length });
+        return { success: true };
+      } catch (e) {
+        this.logger.error('Export PDF failed', { error: e?.message || String(e) });
+        return { success: false, error: e?.message || String(e) };
+      }
+    });
+
     // Start batch (async with progress events)
     ipcMain.handle('screenshot:start-batch', async (_evt, req) => {
       this.startBatchJob(req);
@@ -406,3 +518,28 @@ class CyberheldApp {
 }
 
 new CyberheldApp();
+
+function buildDefaultFilename(post, ext) {
+  const title = (post?.title || post?.id || 'export').toString()
+    .replace(/[^a-z0-9-_]+/gi, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  return `${title}_${ts}.${ext}`;
+}
+
+function buildCommentFilename(comment, ext) {
+  try {
+    const meta = JSON.parse(comment.metadata || '{}');
+    const name = (meta.profileName || 'author').toString()
+      .replace(/[^a-z0-9-_]+/gi, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_+|_+$/g, '');
+    const dt = meta.date ? new Date(meta.date) : new Date(comment.timestamp_captured || Date.now());
+    const ts = dt.toISOString().replace(/[:.]/g, '-');
+    return `${name}_${ts}.${ext}`;
+  } catch {
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    return `comment_${comment.id}_${ts}.${ext}`;
+  }
+}

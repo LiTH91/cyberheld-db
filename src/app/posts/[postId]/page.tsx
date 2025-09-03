@@ -239,6 +239,27 @@ export default function PostCommentsPage() {
               <button className="btn-primary" onClick={takeBatchScreenshots} disabled={!!job}>
                 Screenshots (fehlende)
               </button>
+              <div className="border-l h-6 mx-2" />
+              <button
+                className="btn-secondary"
+                onClick={async () => {
+                  const ids = Object.entries(selectedIds).filter(([id, v]) => v).map(([id]) => id);
+                  const res = await window.electronAPI.exportJson(postId, '', ids);
+                  if (!res?.success && !res?.cancelled) alert('Export JSON fehlgeschlagen: ' + (res?.error || 'Unbekannt'));
+                }}
+              >
+                Export JSON
+              </button>
+              <button
+                className="btn-secondary"
+                onClick={async () => {
+                  const ids = Object.entries(selectedIds).filter(([id, v]) => v).map(([id]) => id);
+                  const res = await window.electronAPI.exportPdf(postId, '', ids);
+                  if (!res?.success && !res?.cancelled) alert('Export PDF fehlgeschlagen: ' + (res?.error || 'Unbekannt'));
+                }}
+              >
+                Export PDF
+              </button>
             </div>
           </div>
           {job && (
