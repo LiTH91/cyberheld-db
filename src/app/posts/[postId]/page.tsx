@@ -224,6 +224,7 @@ export default function PostCommentsPage() {
                     <th className="table-header">Text</th>
                     <th className="table-header">Likes</th>
                     <th className="table-header">Antworten</th>
+                    <th className="table-header">Status</th>
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
@@ -288,6 +289,13 @@ export default function PostCommentsPage() {
                         </td>
                         <td className="table-cell">{meta.likesCount ?? '-'}</td>
                         <td className="table-cell">{meta.commentsCount ?? '-'}</td>
+                        <td className="table-cell">
+                          {c.last_error ? (
+                            <span className="text-red-600 text-xs" title={c.last_error}>Fehler</span>
+                          ) : (
+                            <span className="text-green-700 text-xs">OK</span>
+                          )}
+                        </td>
                       </tr>
                     );
                   })}

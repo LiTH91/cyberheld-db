@@ -360,7 +360,12 @@ class CyberheldApp {
         }
       }
 
-      if (success) this.currentJob.completed += 1; else this.currentJob.failed += 1;
+      if (success) {
+        this.currentJob.completed += 1;
+      } else {
+        this.currentJob.failed += 1;
+        await this.dbService.recordCommentError(c.id, lastError?.message || String(lastError));
+      }
       send({ type: 'progress', completed: this.currentJob.completed, failed: this.currentJob.failed, total: this.currentJob.total, last: { id: c.id, success, error: success ? null : (lastError?.message || String(lastError)) } });
 
       // Inter-item backoff

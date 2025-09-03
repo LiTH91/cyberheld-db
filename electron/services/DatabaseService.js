@@ -20,6 +20,7 @@ class DatabaseService {
     this.db.pragma('foreign_keys = ON');
     
     this.createTables();
+    this.addMissingColumns();
   }
 
   createTables() {
@@ -59,6 +60,20 @@ class DatabaseService {
       CREATE INDEX IF NOT EXISTS idx_comments_url ON comments (url);
       CREATE INDEX IF NOT EXISTS idx_posts_filename ON posts (filename);
     `);
+  }
+
+  addMissingColumns() {
+    if (!this.db) return;
+    try {
+      const cols = this.db.prepare('PRAGMA table_info(comments)').all();
+      const names = new Set(cols.map((c) => c.name));
+      if (!names.has('last_error')) {
+        this.db.exec('ALTER TABLE comments ADD COLUMN last_error TEXT');
+      }
+      if (!names.has('last_attempt_at')) {
+        this.db.exec('ALTER TABLE comments ADD COLUMN last_attempt_at INTEGER');
+      }
+    } catch {}
   }
 
   async importJsonFile(filePath) {
@@ -201,9 +216,18 @@ class DatabaseService {
   async updateCommentScreenshot(commentId, screenshotPath) {
     if (!this.db) throw new Error('Database not initialized');
     const stmt = this.db.prepare(`
-      UPDATE comments SET screenshot_path = ? WHERE id = ?
+      UPDATE comments SET screenshot_path = ?, last_error = NULL WHERE id = ?
     `);
     stmt.run(screenshotPath, commentId);
+  }
+
+  async recordCommentError(commentId, message) {
+    if (!this.db) throw new Error('Database not initialized');
+    const now = Date.now();
+    const stmt = this.db.prepare(`
+      UPDATE comments SET last_error = ?, last_attempt_at = ? WHERE id = ?
+    `);
+    stmt.run(String(message || ''), now, commentId);
   }
 
   async getCommentById(commentId) {
