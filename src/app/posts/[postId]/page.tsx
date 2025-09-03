@@ -52,7 +52,11 @@ export default function PostCommentsPage() {
   const takeBatchScreenshots = async () => {
     const todo = comments
       .filter((c) => !c.screenshot_path)
-      .map((c) => ({ id: c.id, url: c.url }));
+      .map((c) => {
+        const meta = JSON.parse(c.metadata);
+        const snippet = typeof meta?.text === 'string' ? meta.text.slice(0, 160) : '';
+        return { id: c.id, url: c.url, snippet } as any;
+      });
     if (todo.length === 0) {
       alert('Alle Kommentare haben bereits Screenshots.');
       return;
@@ -71,7 +75,11 @@ export default function PostCommentsPage() {
   const takeSelectedScreenshots = async () => {
     const todo = comments
       .filter((c) => selectedIds[c.id])
-      .map((c) => ({ id: c.id, url: c.url }));
+      .map((c) => {
+        const meta = JSON.parse(c.metadata);
+        const snippet = typeof meta?.text === 'string' ? meta.text.slice(0, 160) : '';
+        return { id: c.id, url: c.url, snippet } as any;
+      });
     if (todo.length === 0) {
       alert('Bitte wähle mindestens einen Kommentar aus.');
       return;
@@ -84,6 +92,23 @@ export default function PostCommentsPage() {
       setSelectedIds({});
     } else {
       alert('Fehler beim Screenshot-Job.');
+    }
+  };
+
+  const deleteSelectedScreenshots = async () => {
+    const ids = comments.filter((c) => selectedIds[c.id]).map((c) => c.id);
+    if (ids.length === 0) {
+      alert('Bitte wähle mindestens einen Kommentar aus.');
+      return;
+    }
+    const res = await window.electronAPI.deleteScreenshotsBatch(ids);
+    if (res.success) {
+      alert(`Gelöscht: ${res.completed}, Fehler: ${res.failed}`);
+      const refreshed = await window.electronAPI.getComments({ postId });
+      if (refreshed.success) setComments(refreshed.comments);
+      setSelectedIds({});
+    } else {
+      alert('Fehler beim Löschen.');
     }
   };
 
@@ -120,6 +145,9 @@ export default function PostCommentsPage() {
           <div className="flex justify-between items-center mb-4">
             <div className="text-sm text-gray-600">{comments.length} Kommentare</div>
             <div className="flex gap-2">
+              <button className="btn-secondary" onClick={deleteSelectedScreenshots}>
+                Screenshots löschen (ausgewählte)
+              </button>
               <button className="btn-secondary" onClick={takeSelectedScreenshots}>
                 Screenshots (ausgewählte)
               </button>

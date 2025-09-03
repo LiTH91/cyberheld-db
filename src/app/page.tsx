@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { DocumentPlusIcon, FolderOpenIcon } from '@heroicons/react/24/outline';
+import { DocumentPlusIcon, FolderOpenIcon, LockClosedIcon } from '@heroicons/react/24/outline';
 import PostsList from '@/components/PostsList';
 import type { Post } from '@/types/facebook';
 
@@ -55,6 +55,19 @@ export default function HomePage() {
     }
   };
 
+  const handleFacebookLogin = async () => {
+    try {
+      const res = await window.electronAPI.facebookLogin();
+      if (res.success) {
+        alert('Login erfolgreich gespeichert.');
+      } else {
+        alert('Login fehlgeschlagen: ' + (res.error || 'Unbekannter Fehler'));
+      }
+    } catch (e: any) {
+      alert('Login-Fehler: ' + (e?.message || String(e)));
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-96">
@@ -92,6 +105,13 @@ export default function HomePage() {
                 JSON Importieren
               </>
             )}
+          </button>
+          <button
+            onClick={handleFacebookLogin}
+            className="btn-secondary flex items-center gap-2 ml-2"
+          >
+            <LockClosedIcon className="h-5 w-5" />
+            Facebook Login
           </button>
         </div>
       </div>

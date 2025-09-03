@@ -206,6 +206,23 @@ class DatabaseService {
     stmt.run(screenshotPath, commentId);
   }
 
+  async getCommentById(commentId) {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare('SELECT * FROM comments WHERE id = ?');
+    return stmt.get(commentId);
+  }
+
+  async clearCommentScreenshot(commentId) {
+    if (!this.db) throw new Error('Database not initialized');
+    // Fetch current path
+    const row = await this.getCommentById(commentId);
+    if (row && row.screenshot_path) {
+      try { fs.unlinkSync(row.screenshot_path); } catch {}
+    }
+    const stmt = this.db.prepare('UPDATE comments SET screenshot_path = NULL WHERE id = ?');
+    stmt.run(commentId);
+  }
+
   extractPostId(facebookUrl) {
     // Extract post ID from Facebook URL
     const match = facebookUrl.match(/posts\/([^/?]+)/);

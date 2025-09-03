@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs-extra');
 const { DatabaseService } = require('./services/DatabaseService');
 const { BrowserService } = require('./services/BrowserService');
+const { SettingsService } = require('./services/SettingsService');
 
 // Fix Windows GPU crashes by disabling hardware acceleration
 // Must be called before app.whenReady()
@@ -20,11 +21,15 @@ const IPC_CHANNELS = {
   OPEN_SCREENSHOT: 'file:open-screenshot',
 };
 
+const PROGRESS_CHANNEL = 'screenshot:progress';
+
 class CyberheldApp {
   constructor() {
     this.mainWindow = null;
     this.dbService = new DatabaseService();
     this.browserService = new BrowserService();
+    this.settingsService = new SettingsService();
+    this.currentJob = null; // { total, completed, failed, paused, cancelled }
     this.setupApp();
     this.setupIPC();
   }
@@ -67,6 +72,8 @@ class CyberheldApp {
 
     // Initialize services
     await this.dbService.initialize();
+    // Load settings and init browser with possible chromePath override later
+    const loaded = await this.settingsService.loadSettings();
     await this.browserService.initBrowser(false);
 
     const isDev = process.env.NODE_ENV === 'development';
@@ -143,19 +150,100 @@ class CyberheldApp {
     // Batch screenshots
     ipcMain.handle(IPC_CHANNELS.TAKE_SCREENSHOTS_BATCH, async (_evt, req) => {
       const results = { success: true, completed: 0, failed: 0, errors: [] };
-      for (const c of req.comments) {
+      // Shuffle Reihenfolge
+      const shuffled = [...req.comments].sort(() => Math.random() - 0.5);
+      // deterministische Backoff-Liste (falls Zufall nicht gewünscht):
+      const fixedBackoff = [2000, 5000, 2000, 4000, 3000, 6000];
+      let idx = 0;
+      for (const c of shuffled) {
         try {
-          const filePath = await this.browserService.takeScreenshot(c.url, req.postId, c.id);
+          const filePath = await this.browserService.takeScreenshot(c.url, req.postId, c.id, c.snippet);
           await this.dbService.updateCommentScreenshot(c.id, filePath);
           results.completed += 1;
-          // kleine Pause
-          await new Promise(r => setTimeout(r, 1500 + Math.random() * 1000));
+          // Backoff: random 2-6s oder fixed Sequenz
+          const s = await this.settingsService.getSettings();
+          const useFixed = !!s.fixedBackoff;
+          const minMs = Math.max(1000, (s.minDelaySec ?? 2) * 1000);
+          const maxMs = Math.max(minMs + 1, (s.maxDelaySec ?? 6) * 1000);
+          if (useFixed) {
+            const wait = fixedBackoff[idx % fixedBackoff.length];
+            idx++;
+            await new Promise(r => setTimeout(r, wait));
+          } else {
+            const wait = Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
+            await new Promise(r => setTimeout(r, wait));
+          }
         } catch (e) {
           results.failed += 1;
           results.errors.push({ commentId: c.id, error: e?.message || String(e) });
         }
       }
       return results;
+    });
+
+    // Helper: Trigger Facebook Login (manuell vom Benutzer)
+    ipcMain.handle('auth:facebook-login', async () => {
+      try {
+        const ok = await this.browserService.loginToFacebook();
+        return { success: ok };
+      } catch (e) {
+        return { success: false, error: e?.message || String(e) };
+      }
+    });
+
+    // Helper: Cookies löschen
+    ipcMain.handle('auth:cookies-clear', async () => {
+      try {
+        await this.browserService.clearCookies();
+        return { success: true };
+      } catch (e) {
+        return { success: false, error: e?.message || String(e) };
+      }
+    });
+
+    // Settings: get current status
+    ipcMain.handle('settings:get-status', async () => {
+      try {
+        const st = await this.browserService.getStatus();
+        const s = await this.settingsService.getSettings();
+        return { success: true, status: { ...st, settings: s } };
+      } catch (e) {
+        return { success: false, error: e?.message || String(e) };
+      }
+    });
+
+    ipcMain.handle('settings:save', async (_evt, next) => {
+      try {
+        const saved = await this.settingsService.saveSettings(next);
+        return { success: true, settings: saved };
+      } catch (e) {
+        return { success: false, error: e?.message || String(e) };
+      }
+    });
+
+    // Delete single screenshot
+    ipcMain.handle('screenshot:delete', async (_evt, { commentId }) => {
+      try {
+        await this.dbService.clearCommentScreenshot(commentId);
+        return { success: true };
+      } catch (e) {
+        return { success: false, error: e?.message || String(e) };
+      }
+    });
+
+    // Delete batch screenshots
+    ipcMain.handle('screenshot:delete-batch', async (_evt, { commentIds }) => {
+      const res = { success: true, completed: 0, failed: 0, errors: [] };
+      for (const id of commentIds) {
+        try {
+          await this.dbService.clearCommentScreenshot(id);
+          res.completed += 1;
+        } catch (e) {
+          res.failed += 1;
+          res.errors.push({ commentId: id, error: e?.message || String(e) });
+        }
+      }
+      return res;
     });
 
     // Get all posts
@@ -208,6 +296,81 @@ class CyberheldApp {
       const { shell } = require('electron');
       await shell.openPath(screenshotPath);
     });
+
+    // Start batch (async with progress events)
+    ipcMain.handle('screenshot:start-batch', async (_evt, req) => {
+      this.startBatchJob(req);
+      return { success: true };
+    });
+
+    ipcMain.handle('screenshot:pause', async () => {
+      if (this.currentJob) this.currentJob.paused = true;
+      return { success: true };
+    });
+    ipcMain.handle('screenshot:resume', async () => {
+      if (this.currentJob) this.currentJob.paused = false;
+      return { success: true };
+    });
+    ipcMain.handle('screenshot:cancel', async () => {
+      if (this.currentJob) this.currentJob.cancelled = true;
+      return { success: true };
+    });
+    ipcMain.handle('screenshot:status', async () => {
+      const j = this.currentJob;
+      if (!j) return { success: true, job: null };
+      return { success: true, job: { total: j.total, completed: j.completed, failed: j.failed, paused: j.paused, cancelled: j.cancelled } };
+    });
+  }
+
+  async startBatchJob(req) {
+    const win = this.mainWindow;
+    const s = await this.settingsService.getSettings();
+    const fixedBackoff = [2000, 5000, 2000, 4000, 3000, 6000];
+    let idx = 0;
+    const useFixed = !!s.fixedBackoff;
+    const minMs = Math.max(1000, (s.minDelaySec ?? 2) * 1000);
+    const maxMs = Math.max(minMs + 1, (s.maxDelaySec ?? 6) * 1000);
+
+    const shuffled = [...req.comments].sort(() => Math.random() - 0.5);
+    this.currentJob = { total: shuffled.length, completed: 0, failed: 0, paused: false, cancelled: false };
+
+    const send = (payload) => {
+      try { win && win.webContents.send(PROGRESS_CHANNEL, payload); } catch {}
+    };
+
+    for (const c of shuffled) {
+      if (this.currentJob.cancelled) break;
+      while (this.currentJob.paused && !this.currentJob.cancelled) {
+        await new Promise(r => setTimeout(r, 300));
+      }
+
+      let success = false;
+      let lastError = null;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const filePath = await this.browserService.takeScreenshot(c.url, req.postId, c.id, c.snippet);
+          await this.dbService.updateCommentScreenshot(c.id, filePath);
+          success = true;
+          break;
+        } catch (e) {
+          lastError = e;
+          // attempt backoff: 1.5s, 3s, 5s
+          const attemptWait = [1500, 3000, 5000][attempt - 1] || 3000;
+          await new Promise(r => setTimeout(r, attemptWait));
+        }
+      }
+
+      if (success) this.currentJob.completed += 1; else this.currentJob.failed += 1;
+      send({ type: 'progress', completed: this.currentJob.completed, failed: this.currentJob.failed, total: this.currentJob.total, last: { id: c.id, success, error: success ? null : (lastError?.message || String(lastError)) } });
+
+      // Inter-item backoff
+      if (this.currentJob.cancelled) break;
+      const wait = useFixed ? fixedBackoff[idx++ % fixedBackoff.length] : (Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs);
+      await new Promise(r => setTimeout(r, wait));
+    }
+
+    send({ type: 'done', completed: this.currentJob.completed, failed: this.currentJob.failed, total: this.currentJob.total, cancelled: this.currentJob.cancelled });
+    this.currentJob = null;
   }
 }
 

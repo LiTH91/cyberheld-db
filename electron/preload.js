@@ -29,6 +29,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     
   takeScreenshotsBatch: (request) =>
     ipcRenderer.invoke(IPC_CHANNELS.TAKE_SCREENSHOTS_BATCH, request),
+  // queue controls
+  startBatchScreenshots: (request) => ipcRenderer.invoke('screenshot:start-batch', request),
+  pauseBatch: () => ipcRenderer.invoke('screenshot:pause'),
+  resumeBatch: () => ipcRenderer.invoke('screenshot:resume'),
+  cancelBatch: () => ipcRenderer.invoke('screenshot:cancel'),
+  getBatchStatus: () => ipcRenderer.invoke('screenshot:status'),
 
   // File operations
   selectJsonFile: () =>
@@ -36,4 +42,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     
   openScreenshot: (screenshotPath) =>
     ipcRenderer.invoke(IPC_CHANNELS.OPEN_SCREENSHOT, screenshotPath),
+
+  // Auth helpers
+  facebookLogin: () => ipcRenderer.invoke('auth:facebook-login'),
+  clearCookies: () => ipcRenderer.invoke('auth:cookies-clear'),
+  getSettingsStatus: () => ipcRenderer.invoke('settings:get-status'),
+  saveSettings: (settings) => ipcRenderer.invoke('settings:save', settings),
+
+  // Delete screenshots
+  deleteScreenshot: (commentId) => ipcRenderer.invoke('screenshot:delete', { commentId }),
+  deleteScreenshotsBatch: (commentIds) => ipcRenderer.invoke('screenshot:delete-batch', { commentIds }),
 });
