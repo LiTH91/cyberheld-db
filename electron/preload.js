@@ -42,6 +42,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     
   openScreenshot: (screenshotPath) =>
     ipcRenderer.invoke(IPC_CHANNELS.OPEN_SCREENSHOT, screenshotPath),
+  readScreenshotDataUrl: (screenshotPath) => ipcRenderer.invoke('screenshot:read-dataurl', screenshotPath),
 
   // Auth helpers
   facebookLogin: () => ipcRenderer.invoke('auth:facebook-login'),

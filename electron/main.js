@@ -297,6 +297,19 @@ class CyberheldApp {
       await shell.openPath(screenshotPath);
     });
 
+    // Read screenshot as data URL for preview
+    ipcMain.handle('screenshot:read-dataurl', async (_evt, screenshotPath) => {
+      try {
+        const fs = require('fs');
+        if (!screenshotPath || !fs.existsSync(screenshotPath)) return null;
+        const buf = fs.readFileSync(screenshotPath);
+        const b64 = buf.toString('base64');
+        return `data:image/png;base64,${b64}`;
+      } catch (e) {
+        return null;
+      }
+    });
+
     // Start batch (async with progress events)
     ipcMain.handle('screenshot:start-batch', async (_evt, req) => {
       this.startBatchJob(req);

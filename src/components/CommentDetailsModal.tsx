@@ -1,7 +1,9 @@
 'use client';
 
+import React, { useEffect, useMemo, useState } from 'react';
 import { XMarkIcon, ArrowTopRightOnSquareIcon, PhotoIcon } from '@heroicons/react/24/outline';
 import type { Comment } from '@/types/facebook';
+import type { ReactNode } from 'react';
 
 type Props = {
   open: boolean;
@@ -10,15 +12,31 @@ type Props = {
 };
 
 export default function CommentDetailsModal({ open, onClose, comment }: Props) {
-  if (!open || !comment) return null;
+  // Hooks always at top-level to avoid dev warnings
+  const [preview, setPreview] = useState<string | null>(null);
+  const meta = useMemo(() => (comment ? safeParse(comment.metadata) : null), [comment]);
 
-  const meta = safeParse(comment.metadata);
+  useEffect(() => {
+    let mounted = true;
+    const load = async () => {
+      if (open && comment?.screenshot_path) {
+        const url = await window.electronAPI.readScreenshotDataUrl(comment.screenshot_path);
+        if (mounted) setPreview(url || null);
+      } else {
+        setPreview(null);
+      }
+    };
+    load();
+    return () => { mounted = false; };
+  }, [open, comment?.screenshot_path]);
 
   const openScreenshot = async () => {
     if (comment?.screenshot_path) {
       await window.electronAPI.openScreenshot(comment.screenshot_path);
     }
   };
+
+  if (!open || !comment) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -84,9 +102,16 @@ export default function CommentDetailsModal({ open, onClose, comment }: Props) {
 
           <DetailItem label="Screenshot">
             {comment.screenshot_path ? (
-              <button className="btn-secondary inline-flex items-center gap-2" onClick={openScreenshot}>
-                <PhotoIcon className="h-4 w-4" /> Screenshot öffnen
-              </button>
+              <div className="space-y-2">
+                {preview ? (
+                  <img src={preview} alt="Screenshot Preview" className="max-h-80 rounded border" />
+                ) : (
+                  <div className="text-gray-500 text-sm">Keine Vorschau verfügbar</div>
+                )}
+                <button className="btn-secondary inline-flex items-center gap-2" onClick={openScreenshot}>
+                  <PhotoIcon className="h-4 w-4" /> In Ordner öffnen
+                </button>
+              </div>
             ) : (
               <span className="text-gray-500">Kein Screenshot vorhanden</span>
             )}
@@ -101,7 +126,7 @@ export default function CommentDetailsModal({ open, onClose, comment }: Props) {
   );
 }
 
-function DetailItem({ label, children }: { label: string; children: React.ReactNode }) {
+function DetailItem({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div>
       <div className="text-xs uppercase tracking-wide text-gray-500 mb-1">{label}</div>
