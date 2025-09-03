@@ -4,6 +4,8 @@ const fs = require('fs-extra');
 const { DatabaseService } = require('./services/DatabaseService');
 const { BrowserService } = require('./services/BrowserService');
 const { SettingsService } = require('./services/SettingsService');
+const { LoggerService } = require('./services/LoggerService');
+const { AuditService } = require('./services/AuditService');
 
 // Fix Windows GPU crashes by disabling hardware acceleration
 // Must be called before app.whenReady()
@@ -29,6 +31,8 @@ class CyberheldApp {
     this.dbService = new DatabaseService();
     this.browserService = new BrowserService();
     this.settingsService = new SettingsService();
+    this.logger = new LoggerService();
+    this.audit = new AuditService();
     this.currentJob = null; // { total, completed, failed, paused, cancelled }
     this.setupApp();
     this.setupIPC();
@@ -72,6 +76,7 @@ class CyberheldApp {
 
     // Initialize services
     await this.dbService.initialize();
+    this.logger.info('DB initialized');
     // Load settings and init browser with possible chromePath override later
     const loaded = await this.settingsService.loadSettings();
     await this.browserService.initBrowser(false);
@@ -123,9 +128,11 @@ class CyberheldApp {
     ipcMain.handle(IPC_CHANNELS.IMPORT_JSON, async (_, request) => {
       try {
         const result = await this.dbService.importJsonFile(request.filePath);
+        this.logger.info('JSON imported', { file: request.filePath, postId: result.postId, comments: result.commentsImported });
+        this.audit.write('import_json', { file: request.filePath, postId: result.postId, comments: result.commentsImported });
         return result;
       } catch (error) {
-        console.error('Error importing JSON:', error);
+        this.logger.error('Error importing JSON', { error: error?.message || String(error) });
         return {
           success: false,
           postId: '',
@@ -141,8 +148,10 @@ class CyberheldApp {
         const filePath = await this.browserService.takeScreenshot(req.commentUrl, req.postId, req.commentId || req.id || req.comment_id || req, req.snippet);
         // Update DB
         await this.dbService.updateCommentScreenshot(req.commentId || req.id, filePath);
+        this.audit.write('screenshot_single', { id: req.commentId || req.id, postId: req.postId, path: filePath });
         return { success: true, screenshotPath: filePath };
       } catch (error) {
+        this.logger.warn('Screenshot single failed', { error: error?.message || String(error), id: req.commentId || req.id });
         return { success: false, error: error?.message || String(error) };
       }
     });
@@ -178,6 +187,7 @@ class CyberheldApp {
           results.errors.push({ commentId: c.id, error: e?.message || String(e) });
         }
       }
+      this.audit.write('screenshot_batch_done', { postId: req.postId, completed: results.completed, failed: results.failed });
       return results;
     });
 
@@ -185,6 +195,7 @@ class CyberheldApp {
     ipcMain.handle('auth:facebook-login', async () => {
       try {
         const ok = await this.browserService.loginToFacebook();
+        this.audit.write('auth_login', { success: ok });
         return { success: ok };
       } catch (e) {
         return { success: false, error: e?.message || String(e) };
@@ -195,6 +206,7 @@ class CyberheldApp {
     ipcMain.handle('auth:cookies-clear', async () => {
       try {
         await this.browserService.clearCookies();
+        this.audit.write('auth_cookies_cleared');
         return { success: true };
       } catch (e) {
         return { success: false, error: e?.message || String(e) };
@@ -215,6 +227,7 @@ class CyberheldApp {
     ipcMain.handle('settings:save', async (_evt, next) => {
       try {
         const saved = await this.settingsService.saveSettings(next);
+        this.audit.write('settings_saved', saved);
         return { success: true, settings: saved };
       } catch (e) {
         return { success: false, error: e?.message || String(e) };
