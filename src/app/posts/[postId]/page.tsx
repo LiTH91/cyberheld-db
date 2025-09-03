@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'next/navigation';
 import type { Comment } from '@/types/facebook';
 import { ArrowLeftIcon } from '@heroicons/react/24/outline';
@@ -15,6 +15,8 @@ export default function PostCommentsPage() {
   const [selected, setSelected] = useState<Comment | null>(null);
   const [open, setOpen] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Record<string, boolean>>({});
+  const [job, setJob] = useState<{ total: number; completed: number; failed: number; paused?: boolean } | null>(null);
+  const pollTimer = useRef<any>(null);
   const allSelected = useMemo(() => {
     if (comments.length === 0) return false;
     return comments.every((c) => selectedIds[c.id]);
@@ -61,15 +63,8 @@ export default function PostCommentsPage() {
       alert('Alle Kommentare haben bereits Screenshots.');
       return;
     }
-    const res = await window.electronAPI.takeScreenshotsBatch({ postId, comments: todo });
-    if (res.success) {
-      alert(`Screenshots fertig. Erfolgreich: ${res.completed}, Fehlgeschlagen: ${res.failed}`);
-      // reload
-      const refreshed = await window.electronAPI.getComments({ postId });
-      if (refreshed.success) setComments(refreshed.comments);
-    } else {
-      alert('Fehler beim Screenshot-Job.');
-    }
+    await window.electronAPI.startBatchScreenshots({ postId, comments: todo });
+    startPollingJob();
   };
 
   const takeSelectedScreenshots = async () => {
@@ -84,16 +79,48 @@ export default function PostCommentsPage() {
       alert('Bitte wähle mindestens einen Kommentar aus.');
       return;
     }
-    const res = await window.electronAPI.takeScreenshotsBatch({ postId, comments: todo });
-    if (res.success) {
-      alert(`Screenshots fertig. Erfolgreich: ${res.completed}, Fehlgeschlagen: ${res.failed}`);
-      const refreshed = await window.electronAPI.getComments({ postId });
-      if (refreshed.success) setComments(refreshed.comments);
-      setSelectedIds({});
-    } else {
-      alert('Fehler beim Screenshot-Job.');
-    }
+    await window.electronAPI.startBatchScreenshots({ postId, comments: todo });
+    startPollingJob();
   };
+
+  const retakeSelectedScreenshots = async () => {
+    const todo = comments
+      .filter((c) => selectedIds[c.id] && !!c.screenshot_path)
+      .map((c) => {
+        const meta = JSON.parse(c.metadata);
+        const snippet = typeof meta?.text === 'string' ? meta.text.slice(0, 160) : '';
+        return { id: c.id, url: c.url, snippet } as any;
+      });
+    if (todo.length === 0) {
+      alert('Bitte wähle Kommentare mit bestehendem Screenshot aus.');
+      return;
+    }
+    await window.electronAPI.startBatchScreenshots({ postId, comments: todo });
+    startPollingJob();
+  };
+
+  const startPollingJob = () => {
+    if (pollTimer.current) clearTimeout(pollTimer.current);
+    const poll = async () => {
+      const st = await window.electronAPI.getBatchStatus();
+      if (st?.success && st.job) {
+        setJob({ total: st.job.total, completed: st.job.completed, failed: st.job.failed, paused: st.job.paused });
+        pollTimer.current = setTimeout(poll, 800);
+      } else {
+        // job done
+        setJob(null);
+        const refreshed = await window.electronAPI.getComments({ postId });
+        if (refreshed.success) setComments(refreshed.comments);
+        setSelectedIds({});
+        if (pollTimer.current) clearTimeout(pollTimer.current);
+      }
+    };
+    pollTimer.current = setTimeout(poll, 500);
+  };
+
+  const pauseJob = async () => { await window.electronAPI.pauseBatch(); };
+  const resumeJob = async () => { await window.electronAPI.resumeBatch(); };
+  const cancelJob = async () => { await window.electronAPI.cancelBatch(); };
 
   const deleteSelectedScreenshots = async () => {
     const ids = comments.filter((c) => selectedIds[c.id]).map((c) => c.id);
@@ -148,14 +175,39 @@ export default function PostCommentsPage() {
               <button className="btn-secondary" onClick={deleteSelectedScreenshots}>
                 Screenshots löschen (ausgewählte)
               </button>
-              <button className="btn-secondary" onClick={takeSelectedScreenshots}>
-                Screenshots (ausgewählte)
+              <button className="btn-secondary" onClick={takeSelectedScreenshots} disabled={!!job}>
+                Neu aufnehmen (ausgewählte)
               </button>
-              <button className="btn-primary" onClick={takeBatchScreenshots}>
+              <button className="btn-secondary" onClick={retakeSelectedScreenshots} disabled={!!job}>
+                Erneut aufnehmen (ausgewählte)
+              </button>
+              <button className="btn-primary" onClick={takeBatchScreenshots} disabled={!!job}>
                 Screenshots (fehlende)
               </button>
             </div>
           </div>
+          {job && (
+            <div className="mb-4">
+              <div className="flex items-center justify-between text-sm text-gray-700 mb-1">
+                <span>Fortschritt: {job.completed + job.failed} / {job.total}</span>
+                <span>Fehler: {job.failed}</span>
+              </div>
+              <div className="w-full bg-gray-200 rounded h-2 overflow-hidden">
+                <div
+                  className="bg-blue-600 h-2"
+                  style={{ width: `${Math.min(100, Math.round(((job.completed + job.failed) / job.total) * 100))}%` }}
+                />
+              </div>
+              <div className="mt-2 flex gap-2">
+                {!job.paused ? (
+                  <button className="btn-secondary text-sm" onClick={pauseJob}>Pausieren</button>
+                ) : (
+                  <button className="btn-secondary text-sm" onClick={resumeJob}>Fortsetzen</button>
+                )}
+                <button className="btn-secondary text-sm" onClick={cancelJob}>Abbrechen</button>
+              </div>
+            </div>
+          )}
           {comments.length === 0 ? (
             <div className="text-gray-500">Keine Kommentare gefunden.</div>
           ) : (
@@ -187,16 +239,45 @@ export default function PostCommentsPage() {
                             onChange={(e) => setSelectedIds((prev) => ({ ...prev, [c.id]: e.target.checked }))}
                           />
                         </td>
-                        <td className="table-cell sticky left-0 bg-white z-10 min-w-[150px]">
+                        <td className="table-cell sticky left-0 bg-white z-10 min-w-[280px]">
                           <div className="flex gap-2">
                             <button className="btn-secondary text-sm" onClick={() => openDetails(c)}>
                               Details
                             </button>
                             {c.screenshot_path ? (
-                              <button className="btn-secondary text-sm" onClick={() => openScreenshot(c.screenshot_path!)}>
-                                Screenshot
+                              <>
+                                <button className="btn-secondary text-sm" onClick={() => openScreenshot(c.screenshot_path!)}>
+                                  Screenshot
+                                </button>
+                                <button
+                                  className="btn-secondary text-sm"
+                                  onClick={async () => {
+                                    const meta = JSON.parse(c.metadata);
+                                    const snippet = typeof meta?.text === 'string' ? meta.text.slice(0, 160) : '';
+                                    const res = await window.electronAPI.takeScreenshot({ postId, commentUrl: c.url, commentId: c.id, snippet });
+                                    if (!res?.success) alert('Erneut aufnehmen fehlgeschlagen: ' + (res?.error || 'Unbekannter Fehler'));
+                                    const refreshed = await window.electronAPI.getComments({ postId });
+                                    if (refreshed.success) setComments(refreshed.comments);
+                                  }}
+                                >
+                                  Erneut aufnehmen
+                                </button>
+                              </>
+                            ) : (
+                              <button
+                                className="btn-secondary text-sm"
+                                onClick={async () => {
+                                  const meta = JSON.parse(c.metadata);
+                                  const snippet = typeof meta?.text === 'string' ? meta.text.slice(0, 160) : '';
+                                  const res = await window.electronAPI.takeScreenshot({ postId, commentUrl: c.url, commentId: c.id, snippet });
+                                  if (!res?.success) alert('Neuaufnahme fehlgeschlagen: ' + (res?.error || 'Unbekannter Fehler'));
+                                  const refreshed = await window.electronAPI.getComments({ postId });
+                                  if (refreshed.success) setComments(refreshed.comments);
+                                }}
+                              >
+                                Neu aufnehmen
                               </button>
-                            ) : null}
+                            )}
                           </div>
                         </td>
                         <td className="table-cell min-w-[160px]">{meta.profileName}</td>

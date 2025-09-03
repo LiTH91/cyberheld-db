@@ -138,7 +138,7 @@ class CyberheldApp {
     // Take single screenshot
     ipcMain.handle(IPC_CHANNELS.TAKE_SCREENSHOT, async (_evt, req) => {
       try {
-        const filePath = await this.browserService.takeScreenshot(req.commentUrl, req.postId, req.commentId || req.id || req.comment_id || req);
+        const filePath = await this.browserService.takeScreenshot(req.commentUrl, req.postId, req.commentId || req.id || req.comment_id || req, req.snippet);
         // Update DB
         await this.dbService.updateCommentScreenshot(req.commentId || req.id, filePath);
         return { success: true, screenshotPath: filePath };
