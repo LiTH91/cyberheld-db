@@ -94,6 +94,9 @@ export default function CommentDetailsModal({ open, onClose, comment }: Props) {
                 </a>
               ) : '—'}
             </DetailItem>
+            <DetailItem label="Screenshot-Checksum (SHA256)">
+              {comment.checksum_screenshot ?? '—'}
+            </DetailItem>
           </div>
 
           <DetailItem label="Text">

@@ -12,6 +12,8 @@
 - ✅ Kommentar-Details-Modal mit Metadaten
 - ✅ Batch-Screenshot-Button in der Kommentarseite (fehlende)
 - ✅ Checkbox-Auswahl und Button „Screenshots (ausgewählte)”
+- ✅ Export (JSON/PDF) inkl. Auswahl einzelner Kommentare und pro-Kommentar-Dateinamen
+- ✅ Prüfsummen (SHA256) für Screenshots: Speicherung in DB, Anzeige, Export
 - ⏳ Automatische Screenshot-Erstellung (Phase 2)
 - ⏳ Kommentar-Detail-Popup mit Metadaten (Phase 3)
 - ⏳ Screenshot-Verwaltung und -Anzeige (Phase 3)
@@ -74,6 +76,7 @@ cyberheld-db/
 - **electron/services/BrowserService.js**: Puppeteer + Stealth gesteuerter Browser-Service für Screenshots
   - `initBrowser(headless)` – initialisiert einen persistenten Browser
   - `takeScreenshot(commentUrl, postId, commentId)` – erstellt FullPage-Screenshot und gibt Pfad zurück
+- **electron/services/ExportService.js**: Export von JSON und PDF (eingebettete Screenshots, Checksum-Ausgabe)
 - **electron/preload.ts**: Preload Script für sichere IPC-Kommunikation
   - Exports: `window.electronAPI` Interface
 - **electron/services/DatabaseService.js**: SQLite-Datenbankservice
@@ -113,18 +116,11 @@ cyberheld-db/
 - **IPC_CHANNELS.TAKE_SCREENSHOT / TAKE_SCREENSHOTS_BATCH**: Screenshots aufnehmen
   - Implementiert in: `electron/main.js` (ruft `BrowserService` und `DatabaseService.updateCommentScreenshot`)
 
-### Datenbank-Service (electron/services/DatabaseService.ts)
-- **DatabaseService.importJsonFile()**: JSON-Import-Logik
-  - Definiert in: `electron/services/DatabaseService.ts`
-  - Verwendet in: `electron/main.ts`
-- **DatabaseService.getPosts()**: Posts aus DB laden
-  - Definiert in: `electron/services/DatabaseService.ts`
-  - Verwendet in: `electron/main.ts`
-- **DatabaseService.getComments()**: Kommentare für Post laden
-  - Definiert in: `electron/services/DatabaseService.ts`
-  - Verwendet in: `electron/main.ts`
-- **DatabaseService.updateCommentScreenshot()**: Speichert Screenshot-Pfad
-  - Definiert in: `electron/services/DatabaseService.js`
+### Datenbank-Service (electron/services/DatabaseService.js)
+- `DatabaseService.importJsonFile()` – JSON-Import-Logik
+- `DatabaseService.getPosts()` – Posts aus DB laden
+- `DatabaseService.getComments()` – Kommentare für Post laden
+- `DatabaseService.updateCommentScreenshot()` – Speichert Screenshot-Pfad und SHA256-Checksumme
 
 ### Global API (window.electronAPI)
 - **window.electronAPI**: Globale Electron-API für Frontend

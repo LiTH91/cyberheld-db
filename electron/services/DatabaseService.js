@@ -215,10 +215,16 @@ class DatabaseService {
 
   async updateCommentScreenshot(commentId, screenshotPath) {
     if (!this.db) throw new Error('Database not initialized');
+    let checksum = null;
+    try {
+      const buf = fs.readFileSync(screenshotPath);
+      checksum = crypto.createHash('sha256').update(buf).digest('hex');
+    } catch {}
+    const now = Date.now();
     const stmt = this.db.prepare(`
-      UPDATE comments SET screenshot_path = ?, last_error = NULL WHERE id = ?
+      UPDATE comments SET screenshot_path = ?, checksum_screenshot = ?, last_error = NULL, last_attempt_at = ? WHERE id = ?
     `);
-    stmt.run(screenshotPath, commentId);
+    stmt.run(screenshotPath, checksum, now, commentId);
   }
 
   async recordCommentError(commentId, message) {
@@ -243,7 +249,7 @@ class DatabaseService {
     if (row && row.screenshot_path) {
       try { fs.unlinkSync(row.screenshot_path); } catch {}
     }
-    const stmt = this.db.prepare('UPDATE comments SET screenshot_path = NULL WHERE id = ?');
+    const stmt = this.db.prepare('UPDATE comments SET screenshot_path = NULL, checksum_screenshot = NULL WHERE id = ?');
     stmt.run(commentId);
   }
 

@@ -42,7 +42,8 @@ class ExportService {
           <div style="font-weight:600; font-size:14px;">${esc(meta.profileName || '')}</div>
           <div style="color:#555; font-size:12px; margin-bottom:8px;">${esc(new Date(meta.date || c.timestamp_captured).toLocaleString('de-DE'))}</div>
           <div style="white-space:pre-wrap; margin-bottom:8px;">${esc(meta.text || '')}</div>
-          <div style="font-size:12px; color:#666; margin-bottom:8px;">Likes: ${esc(meta.likesCount || 0)} · Antworten: ${esc(meta.commentsCount || 0)}</div>
+          <div style="font-size:12px; color:#666; margin-bottom:4px;">Likes: ${esc(meta.likesCount || 0)} · Antworten: ${esc(meta.commentsCount || 0)}</div>
+          <div style="font-size:11px; color:#6b7280; margin-bottom:8px;">Checksum (SHA256): ${esc(c.checksum_screenshot || '-')}</div>
           ${img}
         </section>
       `;
