@@ -17,6 +17,61 @@ export default function PostCommentsPage() {
   const [selectedIds, setSelectedIds] = useState<Record<string, boolean>>({});
   const [job, setJob] = useState<{ total: number; completed: number; failed: number; paused?: boolean } | null>(null);
   const pollTimer = useRef<any>(null);
+  const [query, setQuery] = useState('');
+  const [onlyNoShot, setOnlyNoShot] = useState(false);
+  const [onlyError, setOnlyError] = useState(false);
+  const [sortKey, setSortKey] = useState<'date'|'likes'|'replies'|'profile'|'none'>('none');
+  const [sortDir, setSortDir] = useState<'asc'|'desc'>('desc');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(100);
+
+  const filteredSorted = useMemo(() => {
+    const list = comments
+      .filter((c) => {
+        const meta = JSON.parse(c.metadata);
+        if (onlyNoShot && c.screenshot_path) return false;
+        if (onlyError && !c.last_error) return false;
+        if (!query) return true;
+        const q = query.toLowerCase();
+        const hay = `${meta.profileName || ''} ${meta.text || ''}`.toLowerCase();
+        return hay.includes(q);
+      })
+      .sort((a, b) => {
+        if (sortKey === 'none') return 0;
+        const am = JSON.parse(a.metadata);
+        const bm = JSON.parse(b.metadata);
+        let av = 0, bv = 0;
+        if (sortKey === 'date') {
+          av = am.date ? new Date(am.date).getTime() : 0;
+          bv = bm.date ? new Date(bm.date).getTime() : 0;
+        } else if (sortKey === 'likes') {
+          av = Number(am.likesCount || 0);
+          bv = Number(bm.likesCount || 0);
+        } else if (sortKey === 'replies') {
+          av = Number(am.commentsCount || 0);
+          bv = Number(bm.commentsCount || 0);
+        } else if (sortKey === 'profile') {
+          return String(am.profileName || '').localeCompare(String(bm.profileName || '')) * (sortDir === 'asc' ? 1 : -1);
+        }
+        return (av - bv) * (sortDir === 'asc' ? 1 : -1);
+      });
+    return list;
+  }, [comments, query, onlyNoShot, onlyError, sortKey, sortDir]);
+
+  const total = filteredSorted.length;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const safePage = Math.min(page, totalPages);
+  const start = (safePage - 1) * pageSize;
+  const end = Math.min(start + pageSize, total);
+  const visible = filteredSorted.slice(start, end);
+
+  useEffect(() => {
+    setPage(1);
+  }, [query, onlyNoShot, onlyError, sortKey, sortDir, pageSize]);
+
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [totalPages]);
   const allSelected = useMemo(() => {
     if (comments.length === 0) return false;
     return comments.every((c) => selectedIds[c.id]);
@@ -212,6 +267,56 @@ export default function PostCommentsPage() {
             <div className="text-gray-500">Keine Kommentare gefunden.</div>
           ) : (
             <div className="overflow-x-auto">
+              {/* Filter/Sort Controls */}
+              <div className="mb-3 flex flex-col md:flex-row gap-2 md:items-center md:justify-between">
+                <div className="flex gap-2 items-center">
+                  <input
+                    type="text"
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder="Suche (Text/Autor)"
+                    className="border rounded px-3 py-2 w-64"
+                  />
+                  <label className="inline-flex items-center gap-2 text-sm">
+                    <input type="checkbox" checked={onlyNoShot} onChange={(e) => setOnlyNoShot(e.target.checked)} />
+                    nur ohne Screenshot
+                  </label>
+                  <label className="inline-flex items-center gap-2 text-sm">
+                    <input type="checkbox" checked={onlyError} onChange={(e) => setOnlyError(e.target.checked)} />
+                    nur Fehler
+                  </label>
+                </div>
+                <div className="flex gap-2 items-center">
+                  <select value={sortKey} onChange={(e) => setSortKey(e.target.value as any)} className="border rounded px-2 py-2">
+                    <option value="none">Keine Sortierung</option>
+                    <option value="date">Datum</option>
+                    <option value="likes">Likes</option>
+                    <option value="replies">Antworten</option>
+                    <option value="profile">Autor</option>
+                  </select>
+                  <select value={sortDir} onChange={(e) => setSortDir(e.target.value as any)} className="border rounded px-2 py-2">
+                    <option value="desc">Desc</option>
+                    <option value="asc">Asc</option>
+                  </select>
+                </div>
+              </div>
+              <div className="mb-2 flex items-center justify-between text-sm text-gray-600">
+                <div>
+                  Zeige {start + 1}-{end} von {total}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button className="btn-secondary text-sm" disabled={safePage <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>Zurück</button>
+                  <span>Seite {safePage}/{totalPages}</span>
+                  <button className="btn-secondary text-sm" disabled={safePage >= totalPages} onClick={() => setPage((p) => Math.min(totalPages, p + 1))}>Weiter</button>
+                  <select className="border rounded px-2 py-1" value={pageSize} onChange={(e) => setPageSize(parseInt(e.target.value, 10))}>
+                    <option value={50}>50</option>
+                    <option value={100}>100</option>
+                    <option value={200}>200</option>
+                    <option value={500}>500</option>
+                  </select>
+                </div>
+              </div>
+
               <table className="min-w-full divide-y divide-gray-200">
                 <thead className="bg-gray-50">
                   <tr>
@@ -228,7 +333,7 @@ export default function PostCommentsPage() {
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
-                  {comments.map((c) => {
+                  {visible.map((c) => {
                     const meta = JSON.parse(c.metadata);
                     return (
                       <tr key={c.id} className="hover:bg-gray-50">
