@@ -194,6 +194,14 @@ class BrowserService {
 
       // Find scrollable container inside dialog
       let container = await this.findDialogScrollable(page);
+      // Probe to refine the actual scrollable child element
+      try {
+        const probed0 = await this.findDialogScrollableByProbe(page);
+        if (probed0) {
+          container = probed0;
+          console.log('[likes] probe selected initial container');
+        }
+      } catch {}
       if (!container) throw new Error('Scroll-Container im Likes-Dialog nicht gefunden.');
 
       // Phase 1: Preload entire list by scrolling to bottom until scrollHeight stabilizes
@@ -230,8 +238,11 @@ class BrowserService {
       let guard = 0;
       let repeated = 0; let prevHash = '';
       while (guard++ < 300) {
-        // Re-acquire potential virtualized container and fresh box each loop
-        try { const c2 = await this.findDialogScrollable(page); if (c2) container = c2; } catch {}
+        // Re-probe each loop to stick to the real scrollable node in virtualized lists
+        try {
+          const probed = await this.findDialogScrollableByProbe(page);
+          if (probed) { container = probed; console.log('[likes] probe switched container (pre)'); }
+        } catch {}
         const bx = await container.boundingBox();
         if (!bx) break;
         box.x = bx.x; box.y = bx.y; box.width = bx.width; box.height = bx.height;
