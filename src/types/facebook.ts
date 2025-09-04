@@ -59,6 +59,12 @@ export interface Comment {
   metadata: string; // JSON string
   checksum_screenshot?: string;
   checksum_comment_text?: string;
+  // AI analysis fields (nullable)
+  is_negative?: number | boolean;
+  confidence_score?: number | null;
+  reasoning?: string | null;
+  ai_model?: string | null;
+  ai_analyzed_at?: number | null;
 }
 
 export interface DatabaseComment extends Comment {

@@ -8,6 +8,8 @@ const DEFAULT_SETTINGS = {
   fixedBackoff: false,
   chromePath: '',
   slowMode: false,
+  aiLegalContext: '',
+  aiBatchSize: 100,
 };
 
 class SettingsService {

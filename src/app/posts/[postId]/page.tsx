@@ -20,10 +20,46 @@ export default function PostCommentsPage() {
   const [query, setQuery] = useState('');
   const [onlyNoShot, setOnlyNoShot] = useState(false);
   const [onlyError, setOnlyError] = useState(false);
-  const [sortKey, setSortKey] = useState<'date'|'likes'|'replies'|'profile'|'none'>('none');
+  const [sortKey, setSortKey] = useState<'date'|'likes'|'replies'|'profile'|'neg'|'conf'|'none'>('none');
   const [sortDir, setSortDir] = useState<'asc'|'desc'>('desc');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(100);
+  // compact UI helpers
+  const [expandedIds, setExpandedIds] = useState<Record<string, boolean>>({});
+  const toggleExpanded = (id: string) => setExpandedIds((prev) => ({ ...prev, [id]: !prev[id] }));
+  // highlight toggle
+  const [highlightRows, setHighlightRows] = useState<boolean>(true);
+  // top horizontal scroll slider
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [scrollX, setScrollX] = useState(0);
+  const [scrollMax, setScrollMax] = useState(0);
+  // keep slider bounds in sync with container size; depends on visible count
+  useEffect(() => {
+    const update = () => {
+      const el = scrollRef.current;
+      if (!el) return;
+      const max = Math.max(0, el.scrollWidth - el.clientWidth);
+      setScrollMax(max);
+      setScrollX(Math.min(el.scrollLeft, max));
+    };
+    update();
+    const handle = () => update();
+    window.addEventListener('resize', handle);
+    return () => window.removeEventListener('resize', handle);
+  }, [comments, page, pageSize, sortKey, sortDir, query, onlyNoShot, onlyError]);
+  const onScrollContainer = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const max = Math.max(0, el.scrollWidth - el.clientWidth);
+    setScrollMax(max);
+    setScrollX(el.scrollLeft);
+  };
+  const onSliderChange = (val: number) => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollLeft = val;
+    setScrollX(val);
+  };
 
   const filteredSorted = useMemo(() => {
     const list = comments
@@ -52,6 +88,17 @@ export default function PostCommentsPage() {
           bv = Number(bm.commentsCount || 0);
         } else if (sortKey === 'profile') {
           return String(am.profileName || '').localeCompare(String(bm.profileName || '')) * (sortDir === 'asc' ? 1 : -1);
+        } else if (sortKey === 'neg') {
+          av = (a as any).is_negative ? 1 : 0;
+          bv = (b as any).is_negative ? 1 : 0;
+        } else if (sortKey === 'conf') {
+          const an = (a as any);
+          const bn = (b as any);
+          const aConf = typeof an.confidence_score === 'number' ? an.confidence_score : -1;
+          const bConf = typeof bn.confidence_score === 'number' ? bn.confidence_score : -1;
+          // Severity sort: only count confidence for negative items; positives sink to bottom
+          av = an.is_negative ? aConf : -1;
+          bv = bn.is_negative ? bConf : -1;
         }
         return (av - bv) * (sortDir === 'asc' ? 1 : -1);
       });
@@ -194,6 +241,36 @@ export default function PostCommentsPage() {
     }
   };
 
+  const analyzeSelected = async () => {
+    const ids = Object.entries(selectedIds).filter(([id, v]) => v).map(([id]) => id);
+    if (ids.length === 0) {
+      alert('Bitte wähle mindestens einen Kommentar aus.');
+      return;
+    }
+    const res = await window.electronAPI.analyzeComments(ids, undefined, 100);
+    if (!res?.success) {
+      alert('Analyse fehlgeschlagen: ' + (res?.error || 'Unbekannt'));
+      return;
+    }
+    const refreshed = await window.electronAPI.getComments({ postId });
+    if (refreshed.success) setComments(refreshed.comments);
+  };
+
+  const analyzeMissing = async () => {
+    const ids = comments.filter((c) => !c.confidence_score && !c.reasoning && !c.is_negative).map((c) => c.id);
+    if (ids.length === 0) {
+      alert('Keine offenen Kommentare für Analyse.');
+      return;
+    }
+    const res = await window.electronAPI.analyzeComments(ids, undefined, 100);
+    if (!res?.success) {
+      alert('Analyse fehlgeschlagen: ' + (res?.error || 'Unbekannt'));
+      return;
+    }
+    const refreshed = await window.electronAPI.getComments({ postId });
+    if (refreshed.success) setComments(refreshed.comments);
+  };
+
   const toggleAll = () => {
     if (allSelected) {
       setSelectedIds({});
@@ -260,6 +337,9 @@ export default function PostCommentsPage() {
               >
                 Export PDF
               </button>
+              <div className="border-l h-6 mx-2" />
+              <button className="btn-secondary" onClick={analyzeSelected}>Analysieren (ausgewählte)</button>
+              <button className="btn-primary" onClick={analyzeMissing}>Analysieren (fehlende)</button>
             </div>
           </div>
           {job && (
@@ -287,7 +367,20 @@ export default function PostCommentsPage() {
           {comments.length === 0 ? (
             <div className="text-gray-500">Keine Kommentare gefunden.</div>
           ) : (
-            <div className="overflow-x-auto">
+            <>
+              {scrollMax > 0 && (
+                <div className="sticky top-0 z-30 bg-white/90 backdrop-blur p-2 border-b mb-2">
+                  <input
+                    type="range"
+                    min={0}
+                    max={Math.max(0, Math.round(scrollMax))}
+                    value={Math.min(scrollX, scrollMax)}
+                    onChange={(e) => onSliderChange(parseInt(e.target.value || '0', 10))}
+                    className="w-full"
+                  />
+                </div>
+              )}
+              <div className="overflow-x-auto" ref={scrollRef} onScroll={onScrollContainer}>
               {/* Filter/Sort Controls */}
               <div className="mb-3 flex flex-col md:flex-row gap-2 md:items-center md:justify-between">
                 <div className="flex gap-2 items-center">
@@ -306,6 +399,10 @@ export default function PostCommentsPage() {
                     <input type="checkbox" checked={onlyError} onChange={(e) => setOnlyError(e.target.checked)} />
                     nur Fehler
                   </label>
+                  <label className="inline-flex items-center gap-2 text-sm">
+                    <input type="checkbox" checked={highlightRows} onChange={(e) => setHighlightRows(e.target.checked)} />
+                    Farbmarkierung
+                  </label>
                 </div>
                 <div className="flex gap-2 items-center">
                   <select value={sortKey} onChange={(e) => setSortKey(e.target.value as any)} className="border rounded px-2 py-2">
@@ -314,6 +411,8 @@ export default function PostCommentsPage() {
                     <option value="likes">Likes</option>
                     <option value="replies">Antworten</option>
                     <option value="profile">Autor</option>
+                    <option value="neg">Negativ</option>
+                    <option value="conf">Konfidenz</option>
                   </select>
                   <select value={sortDir} onChange={(e) => setSortDir(e.target.value as any)} className="border rounded px-2 py-2">
                     <option value="desc">Desc</option>
@@ -338,27 +437,28 @@ export default function PostCommentsPage() {
                 </div>
               </div>
 
-              <table className="min-w-full divide-y divide-gray-200">
+              <table className="min-w-full divide-y divide-gray-200 text-sm">
                 <thead className="bg-gray-50">
                   <tr>
                     <th className="table-header sticky left-0 bg-gray-50 z-20 w-10">
                       <input type="checkbox" className="h-4 w-4" checked={allSelected} onChange={toggleAll} />
                     </th>
-                    <th className="table-header sticky left-0 bg-gray-50 z-10">Aktionen</th>
+                    <th className="table-header sticky left-0 bg-gray-50 z-10 min-w-[220px]">Aktionen</th>
                     <th className="table-header">Autor</th>
                     <th className="table-header">Datum</th>
-                    <th className="table-header">Text</th>
+                    <th className="table-header min-w-[420px]">Text</th>
                     <th className="table-header">Likes</th>
                     <th className="table-header">Antworten</th>
-                    <th className="table-header">Status</th>
+                    <th className="table-header">AI Negativ</th>
+                    <th className="table-header">AI Konfidenz</th>
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
                   {visible.map((c) => {
                     const meta = JSON.parse(c.metadata);
                     return (
-                      <tr key={c.id} className="hover:bg-gray-50">
-                        <td className="table-cell sticky left-0 bg-white z-20 w-10">
+                      <tr key={c.id} className={`hover:bg-gray-50 ${highlightRows && typeof (c as any).is_negative !== 'undefined' ? ((c as any).is_negative ? 'bg-red-50' : 'bg-green-50') : ''}`}>
+                        <td className="table-cell sticky left-0 bg-white z-20 w-10 py-2">
                           <input
                             type="checkbox"
                             className="h-4 w-4"
@@ -366,7 +466,7 @@ export default function PostCommentsPage() {
                             onChange={(e) => setSelectedIds((prev) => ({ ...prev, [c.id]: e.target.checked }))}
                           />
                         </td>
-                        <td className="table-cell sticky left-0 bg-white z-10 min-w-[280px]">
+                        <td className="table-cell sticky left-0 bg-white z-10 min-w-[220px] py-2">
                           <div className="flex gap-2">
                             <button className="btn-secondary text-sm" onClick={() => openDetails(c)}>
                               Details
@@ -407,27 +507,36 @@ export default function PostCommentsPage() {
                             )}
                           </div>
                         </td>
-                        <td className="table-cell min-w-[160px]">{meta.profileName}</td>
-                        <td className="table-cell whitespace-nowrap">{new Date(meta.date).toLocaleString('de-DE')}</td>
-                        <td className="table-cell max-w-3xl cursor-pointer" onClick={() => openDetails(c)}>
-                          <div className="text-gray-900 line-clamp-3 select-text">{meta.text}</div>
-                          <a href={c.url} target="_blank" rel="noreferrer" className="text-xs text-blue-600">Link</a>
+                        <td className="table-cell min-w-[160px] py-2">{meta.profileName}</td>
+                        <td className="table-cell whitespace-nowrap py-2">{new Date(meta.date).toLocaleString('de-DE')}</td>
+                        <td className="table-cell max-w-3xl py-2">
+                          <div className={expandedIds[c.id] ? 'whitespace-pre-wrap select-text' : 'text-gray-900 line-clamp-2 select-text'}>
+                            {meta.text}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button className="text-xs text-blue-600" onClick={() => toggleExpanded(c.id)}>
+                              {expandedIds[c.id] ? 'Weniger' : 'Mehr'}
+                            </button>
+                            <a href={c.url} target="_blank" rel="noreferrer" className="text-xs text-blue-600">Link</a>
+                          </div>
                         </td>
-                        <td className="table-cell">{meta.likesCount ?? '-'}</td>
-                        <td className="table-cell">{meta.commentsCount ?? '-'}</td>
-                        <td className="table-cell">
-                          {c.last_error ? (
-                            <span className="text-red-600 text-xs" title={c.last_error}>Fehler</span>
-                          ) : (
-                            <span className="text-green-700 text-xs">OK</span>
-                          )}
+                        <td className="table-cell py-2">{meta.likesCount ?? '-'}</td>
+                        <td className="table-cell py-2">{meta.commentsCount ?? '-'}</td>
+                        <td className="table-cell py-2">
+                          {typeof (c as any).is_negative !== 'undefined' ? (
+                            <span className={(c as any).is_negative ? 'text-red-600' : 'text-green-700'}>{(c as any).is_negative ? 'Ja' : 'Nein'}</span>
+                          ) : '—'}
+                        </td>
+                        <td className="table-cell py-2">
+                          {typeof (c as any).confidence_score === 'number' ? `${Math.round(((c as any).confidence_score || 0) * 100)}%` : '—'}
                         </td>
                       </tr>
                     );
                   })}
                 </tbody>
               </table>
-            </div>
+              </div>
+            </>
           )}
         </div>
       )}

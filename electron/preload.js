@@ -57,4 +57,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Delete screenshots
   deleteScreenshot: (commentId) => ipcRenderer.invoke('screenshot:delete', { commentId }),
   deleteScreenshotsBatch: (commentIds) => ipcRenderer.invoke('screenshot:delete-batch', { commentIds }),
+
+  // AI analysis
+  analyzeComments: (commentIds, lawText, batchSize) => ipcRenderer.invoke('ai:analyze-comments', { commentIds, lawText, batchSize }),
 });

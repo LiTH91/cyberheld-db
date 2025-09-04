@@ -9,6 +9,8 @@ export default function SettingsPage() {
   const [minDelay, setMinDelay] = useState<number>(2);
   const [maxDelay, setMaxDelay] = useState<number>(6);
   const [fixedBackoff, setFixedBackoff] = useState<boolean>(false);
+  const [aiLegalContext, setAiLegalContext] = useState<string>('');
+  const [aiBatchSize, setAiBatchSize] = useState<number>(100);
 
   useEffect(() => {
     const load = async () => {
@@ -23,6 +25,8 @@ export default function SettingsPage() {
             setMaxDelay(s.maxDelaySec ?? 6);
             setFixedBackoff(!!s.fixedBackoff);
             setChromePath(s.chromePath || '');
+            setAiLegalContext(s.aiLegalContext || '');
+            setAiBatchSize(Number(s.aiBatchSize || 100));
           }
         }
       } catch {}
@@ -41,6 +45,8 @@ export default function SettingsPage() {
       maxDelaySec: Math.max(1, Number(maxDelay) || 6),
       fixedBackoff,
       chromePath: chromePath.trim(),
+      aiLegalContext: aiLegalContext,
+      aiBatchSize: Math.max(1, Math.min(200, Number(aiBatchSize) || 100)),
     };
     const res = await window.electronAPI.saveSettings(payload);
     if (res?.success) {
@@ -83,6 +89,20 @@ export default function SettingsPage() {
         <label className="text-sm text-gray-600">CHROME_PATH</label>
         <input type="text" className="mt-1 w-full border rounded px-3 py-2" value={chromePath} onChange={(e) => setChromePath(e.target.value)} placeholder="C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" />
         <p className="text-xs text-gray-500">Zuletzt verwendet: {lastExec || '—'}</p>
+        <div className="flex gap-2">
+          <button className="btn-primary" onClick={handleSave}>Speichern</button>
+          <a href="/" className="btn-secondary">Zurück</a>
+        </div>
+      </div>
+
+      <div className="card space-y-3">
+        <h3 className="text-lg font-semibold text-gray-900">KI – Rechtlicher Kontext</h3>
+        <p className="text-sm text-gray-600">Füge hier den rechtlichen Prompt/Leitfaden ein, der der KI mitgegeben wird.</p>
+        <textarea className="mt-1 w-full border rounded px-3 py-2 min-h-[180px]" value={aiLegalContext} onChange={(e) => setAiLegalContext(e.target.value)} placeholder="Rechtlicher Kontext (optional)"></textarea>
+        <div>
+          <label className="text-sm text-gray-600">Batch-Größe (1–200)</label>
+          <input type="number" className="mt-1 w-40 border rounded px-3 py-2" value={aiBatchSize} onChange={(e) => setAiBatchSize(parseInt(e.target.value || '0', 10))} />
+        </div>
         <div className="flex gap-2">
           <button className="btn-primary" onClick={handleSave}>Speichern</button>
           <a href="/" className="btn-secondary">Zurück</a>

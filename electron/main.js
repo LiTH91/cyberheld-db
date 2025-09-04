@@ -7,6 +7,7 @@ const { SettingsService } = require('./services/SettingsService');
 const { LoggerService } = require('./services/LoggerService');
 const { AuditService } = require('./services/AuditService');
 const { ExportService } = require('./services/ExportService');
+const { AIService } = require('./services/AIService');
 
 // Fix Windows GPU crashes by disabling hardware acceleration
 // Must be called before app.whenReady()
@@ -35,6 +36,7 @@ class CyberheldApp {
     this.logger = new LoggerService();
     this.audit = new AuditService();
     this.exporter = new ExportService();
+    this.ai = new AIService();
     this.currentJob = null; // { total, completed, failed, paused, cancelled }
     this.setupApp();
     this.setupIPC();
@@ -457,6 +459,46 @@ class CyberheldApp {
       const j = this.currentJob;
       if (!j) return { success: true, job: null };
       return { success: true, job: { total: j.total, completed: j.completed, failed: j.failed, paused: j.paused, cancelled: j.cancelled } };
+    });
+
+    // AI Analysis
+    ipcMain.handle('ai:analyze-comments', async (_evt, { commentIds, lawText, batchSize }) => {
+      try {
+        if (!Array.isArray(commentIds) || commentIds.length === 0) {
+          return { success: false, error: 'Keine Kommentar-IDs übergeben.' };
+        }
+        const comments = [];
+        for (const id of commentIds) {
+          const c = await this.dbService.getCommentById(id);
+          if (c) {
+            const meta = JSON.parse(c.metadata || '{}');
+            comments.push({ id: c.id, text: String(meta.text || '') });
+          }
+        }
+        if (!comments.length) return { success: false, error: 'Keine Kommentare gefunden.' };
+
+        if (!this.ai || !this.ai.isReady()) {
+          return { success: false, error: 'AI-Service nicht initialisiert. OPENAI_API_KEY setzen und Abhängigkeiten installieren.' };
+        }
+        const settings = await this.settingsService.getSettings();
+        const effectiveLawText = (typeof lawText === 'string' && lawText.length > 0) ? lawText : (settings.aiLegalContext || null);
+        const effectiveBatch = Number(batchSize) || Number(settings.aiBatchSize) || 100;
+        const results = await this.ai.analyzeComments(comments, { batchSize: effectiveBatch, lawText: effectiveLawText });
+        let ok = 0, fail = 0;
+        for (const r of results) {
+          try {
+            await this.dbService.updateCommentAiAnalysis(r.comment_id, r.is_negative, r.confidence_score, r.reasoning, { model: this.ai.model });
+            ok++;
+          } catch (e) {
+            fail++;
+          }
+        }
+        this.audit.write('ai_analyze', { requested: commentIds.length, analyzed: ok, failed: fail });
+        return { success: true, analyzed: ok, failed: fail, results };
+      } catch (e) {
+        this.logger.error('AI analyze failed', { error: e?.message || String(e) });
+        return { success: false, error: e?.message || String(e) };
+      }
     });
   }
 

@@ -97,10 +97,27 @@ export default function CommentDetailsModal({ open, onClose, comment }: Props) {
             <DetailItem label="Screenshot-Checksum (SHA256)">
               {comment.checksum_screenshot ?? '—'}
             </DetailItem>
+
+            <DetailItem label="AI: Negativ">
+              {typeof (comment as any).is_negative !== 'undefined' ? ((comment as any).is_negative ? 'Ja' : 'Nein') : '—'}
+            </DetailItem>
+            <DetailItem label="AI: Konfidenz">
+              {typeof (comment as any).confidence_score === 'number' ? `${Math.round(((comment as any).confidence_score || 0) * 100)}%` : '—'}
+            </DetailItem>
+            <DetailItem label="AI: Modell">
+              {(comment as any).ai_model ?? '—'}
+            </DetailItem>
+            <DetailItem label="AI: Zeitpunkt">
+              {(comment as any).ai_analyzed_at ? new Date((comment as any).ai_analyzed_at).toLocaleString('de-DE') : '—'}
+            </DetailItem>
           </div>
 
           <DetailItem label="Text">
             <div className="whitespace-pre-wrap text-gray-900">{meta?.text ?? '—'}</div>
+          </DetailItem>
+
+          <DetailItem label="AI: Begründung">
+            {(comment as any).reasoning ? <div className="whitespace-pre-wrap text-gray-700">{(comment as any).reasoning}</div> : '—'}
           </DetailItem>
 
           <DetailItem label="Screenshot">

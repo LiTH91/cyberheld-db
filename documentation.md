@@ -39,6 +39,7 @@ cyberheld-db/
 │   ├── services/            # Backend Services
 │   │   ├── DatabaseService.js # SQLite-Datenbanklogik
 │   │   └── BrowserService.js  # Puppeteer-Service
+│   │   └── AIService.js       # OpenAI-gestützte Kommentar-Analyse (Batch, Short-IDs)
 │   ├── main.js              # Electron Main Process
 │   ├── preload.js           # Preload Script für IPC
 │   └── tsconfig.json        # TypeScript Config für Electron
@@ -118,12 +119,27 @@ cyberheld-db/
   - Verwendet in: `electron/main.ts`, `electron/preload.ts`
 - **IPC_CHANNELS.TAKE_SCREENSHOT / TAKE_SCREENSHOTS_BATCH**: Screenshots aufnehmen
   - Implementiert in: `electron/main.js` (ruft `BrowserService` und `DatabaseService.updateCommentScreenshot`)
+ - **ai:analyze-comments**: KI-Analyse für ausgewählte Kommentare (batched)
+   - Request: `{ commentIds: string[], lawText?: string, batchSize?: number }`
+   - Response: `{ success: boolean, analyzed?: number, failed?: number, results?: Array<{comment_id, is_negative, confidence_score, reasoning}> }`
 
 ### Datenbank-Service (electron/services/DatabaseService.js)
 - `DatabaseService.importJsonFile()` – JSON-Import-Logik
 - `DatabaseService.getPosts()` – Posts aus DB laden
 - `DatabaseService.getComments()` – Kommentare für Post laden
 - `DatabaseService.updateCommentScreenshot()` – Speichert Screenshot-Pfad und SHA256-Checksumme
+- `DatabaseService.updateCommentAiAnalysis()` – Speichert KI-Resultate je Kommentar (`is_negative`, `confidence_score`, `reasoning`, `ai_model`, `ai_analyzed_at`)
+
+### AI-Service (electron/services/AIService.js)
+- Batching bis 100 Kommentare; Short-IDs (`c1..cN`) zur Tokenreduktion
+- Responses API mit JSON-Schema-Erzwingung; Retry bei transienten Fehlern
+
+### UI-Erweiterung
+- In `src/app/posts/[postId]/page.tsx`:
+  - Buttons: „Analysieren (ausgewählte)“, „Analysieren (fehlende)“
+  - Spalten: Negativ/Ja-Nein, Konfidenz, Begründung (gekürzt)
+- In `src/components/CommentDetailsModal.tsx`:
+  - Anzeige: Negativ, Konfidenz, Modell, Zeitpunkt, Begründung
 
 ### Global API (window.electronAPI)
 - **window.electronAPI**: Globale Electron-API für Frontend

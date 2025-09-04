@@ -50,6 +50,12 @@ class DatabaseService {
         metadata TEXT NOT NULL,
         checksum_screenshot TEXT,
         checksum_comment_text TEXT,
+        -- AI analysis fields (nullable by default)
+        is_negative INTEGER DEFAULT 0,
+        confidence_score REAL,
+        reasoning TEXT,
+        ai_model TEXT,
+        ai_analyzed_at INTEGER,
         FOREIGN KEY (post_id) REFERENCES posts (id) ON DELETE CASCADE
       )
     `);
@@ -72,6 +78,22 @@ class DatabaseService {
       }
       if (!names.has('last_attempt_at')) {
         this.db.exec('ALTER TABLE comments ADD COLUMN last_attempt_at INTEGER');
+      }
+      // AI analysis related columns
+      if (!names.has('is_negative')) {
+        this.db.exec('ALTER TABLE comments ADD COLUMN is_negative INTEGER DEFAULT 0');
+      }
+      if (!names.has('confidence_score')) {
+        this.db.exec('ALTER TABLE comments ADD COLUMN confidence_score REAL');
+      }
+      if (!names.has('reasoning')) {
+        this.db.exec('ALTER TABLE comments ADD COLUMN reasoning TEXT');
+      }
+      if (!names.has('ai_model')) {
+        this.db.exec('ALTER TABLE comments ADD COLUMN ai_model TEXT');
+      }
+      if (!names.has('ai_analyzed_at')) {
+        this.db.exec('ALTER TABLE comments ADD COLUMN ai_analyzed_at INTEGER');
       }
     } catch {}
   }
@@ -240,6 +262,18 @@ class DatabaseService {
     if (!this.db) throw new Error('Database not initialized');
     const stmt = this.db.prepare('SELECT * FROM comments WHERE id = ?');
     return stmt.get(commentId);
+  }
+
+  async updateCommentAiAnalysis(commentId, isNegative, confidenceScore, reasoning, meta = {}) {
+    if (!this.db) throw new Error('Database not initialized');
+    const now = Date.now();
+    const model = meta.model || meta.ai_model || null;
+    const stmt = this.db.prepare(`
+      UPDATE comments
+      SET is_negative = ?, confidence_score = ?, reasoning = ?, ai_model = ?, ai_analyzed_at = ?
+      WHERE id = ?
+    `);
+    stmt.run(isNegative ? 1 : 0, typeof confidenceScore === 'number' ? confidenceScore : null, reasoning || null, model, now, commentId);
   }
 
   async clearCommentScreenshot(commentId) {
