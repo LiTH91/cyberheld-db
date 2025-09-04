@@ -309,6 +309,9 @@ export default function PostCommentsPage() {
           <div className="flex justify-between items-center mb-4">
             <div className="text-sm text-gray-600">{comments.length} Kommentare</div>
             <div className="flex gap-2">
+              <button className="btn-secondary" onClick={() => window.electronAPI.openLikesFolder(postId)}>
+                Likes-Ordner öffnen
+              </button>
               <button className="btn-secondary" onClick={deleteSelectedScreenshots}>
                 Screenshots löschen (ausgewählte)
               </button>

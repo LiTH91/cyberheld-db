@@ -162,6 +162,12 @@ class BrowserService {
     const page = await this.browser.newPage();
     // Set a stable viewport for modal capture
     await page.setViewport({ width: 1366, height: 900, deviceScaleFactor: 1 });
+    // Relay page console to main terminal for debugging
+    try {
+      page.on('console', (msg) => {
+        try { console.log('[likes][console]', msg.type(), msg.text()); } catch {}
+      });
+    } catch {}
     try {
       await page.setUserAgent(pick(this.userAgents));
       await page.setExtraHTTPHeaders({ 'accept-language': 'de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7' });
@@ -239,31 +245,74 @@ class BrowserService {
   async openLikesDialogForComment(page, numericId, snippetText) {
     try {
       const handle = numericId ? await this.findCommentContainer(page, numericId) : (snippetText ? await this.findContainerBySnippet(page, snippetText) : null);
-      const opened = await page.evaluate((el) => {
+      const opened = await page.evaluate(async (el) => {
         const scope = el || document;
+        const debug = { stage: 'scan', tried: 0, matched: 0 };
         // Common selectors/texts for likes link/button
-        const texts = ['likes', 'gefällt', 'reaktionen', 'reactions', 'people who reacted'];
-        // Prefer clickable anchors/buttons within scope first
-        const candidates = [
-          ...Array.from(scope.querySelectorAll('a,button')),
-          ...Array.from(document.querySelectorAll('div[role="dialog"] a, div[role="dialog"] button')),
-        ];
-        let target = null;
-        for (const b of candidates) {
-          const t = (b.innerText || b.getAttribute('aria-label') || '').toLowerCase();
-          if (t && texts.some(x => t.includes(x))) { target = b; break; }
-          const href = b.getAttribute('href') || '';
-          if (/reaction|ufi|browser/i.test(href)) { target = b; break; }
+        const texts = ['likes', 'gefällt', 'gef e4llt', 'reaktionen', 'reactions', 'people who reacted', 'personen die reagiert', 'personen reagiert'];
+
+        function collectCandidates(root) {
+          const arr = [];
+          const nodes = root.querySelectorAll('a,button,div[role="button"],span[role="button"],div[aria-label],span[aria-label]');
+          nodes.forEach((n) => arr.push(n));
+          return arr;
         }
-        if (target) {
-          try { target.click(); return true; } catch { return false; }
+
+        const near = collectCandidates(scope);
+        const global = collectCandidates(document);
+        const all = [...near, ...global];
+        debug.tried = all.length;
+
+        // Score candidates: prefer ones with matching text/aria or href, and closest to comment container
+        const centerY = (el ? (el.getBoundingClientRect().top + el.getBoundingClientRect().bottom) / 2 : (window.innerHeight/2));
+        let best = null; let bestScore = -1;
+        for (const cand of all) {
+          const text = ((cand.innerText || '') + ' ' + (cand.getAttribute('aria-label') || '')).toLowerCase();
+          const href = (cand.getAttribute('href') || '').toLowerCase();
+          const rect = cand.getBoundingClientRect();
+          const distance = Math.abs(((rect.top + rect.bottom) / 2) - centerY);
+          let score = 0;
+          if (texts.some(x => text.includes(x))) score += 6;
+          if (/reaction|ufi|browser|profile\/browser/.test(href)) score += 4;
+          if (/\d/.test(text)) score += 1; // numbers often part of likes count
+          // clickable heuristic
+          if (cand.tagName === 'A' || cand.tagName === 'BUTTON' || cand.getAttribute('role') === 'button') score += 2;
+          // closer is better
+          score += Math.max(0, 3 - Math.min(3, Math.round(distance / 200)));
+          if (score > bestScore) { bestScore = score; best = cand; }
         }
-        return false;
+        debug.matched = bestScore;
+        if (best) {
+          try {
+            best.scrollIntoView({ block: 'center' });
+            // simulate robust click
+            const ev1 = new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window });
+            const ev2 = new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window });
+            best.dispatchEvent(ev1);
+            best.dispatchEvent(ev2);
+            best.click();
+            return { ok: true, debug };
+          } catch {
+            return { ok: false, debug };
+          }
+        }
+        return { ok: false, debug };
       }, handle);
       try { if (handle) await handle.dispose(); } catch {}
-      if (!opened) return false;
-      // wait for dialog
-      await page.waitForSelector('div[role="dialog"]', { timeout: 5000 });
+      if (!opened || (opened && opened.ok === false)) {
+        console.log('[likes] open failed', opened?.debug || opened);
+        return false;
+      }
+      console.log('[likes] open ok', opened?.debug || opened);
+      // wait for dialog; also check for profile browser overlays
+      await page.waitForSelector('div[role="dialog"], [data-pagelet*="root" i] div[role="dialog"], div[aria-modal="true"]', { timeout: 5000 });
+      // if dialog didn't appear, try keyboard open on focused element (sometimes opens reactions)
+      const hasDlg = await page.$('div[role="dialog"], div[aria-modal="true"]');
+      if (!hasDlg) {
+        await page.keyboard.press('Enter');
+        await page.waitForTimeout(300);
+        await page.waitForSelector('div[role="dialog"], div[aria-modal="true"]', { timeout: 4000 });
+      }
       await page.waitForTimeout(400);
       return true;
     } catch {

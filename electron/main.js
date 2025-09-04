@@ -314,6 +314,16 @@ class CyberheldApp {
       await shell.openPath(screenshotPath);
     });
 
+    // Open likes screenshots folder for a post
+    ipcMain.handle('likes:open-folder', async (_evt, { postId }) => {
+      const { shell } = require('electron');
+      const userData = app.getPath('userData');
+      const dir = path.join(userData, 'screenshots_likes', postId || '');
+      fs.ensureDirSync(dir);
+      await shell.openPath(dir);
+      return { success: true };
+    });
+
     // Read screenshot as data URL for preview
     ipcMain.handle('screenshot:read-dataurl', async (_evt, screenshotPath) => {
       try {
