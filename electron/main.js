@@ -461,6 +461,19 @@ class CyberheldApp {
       return { success: true, job: { total: j.total, completed: j.completed, failed: j.failed, paused: j.paused, cancelled: j.cancelled } };
     });
 
+    // Likes screenshot for a single comment
+    ipcMain.handle('likes:take', async (_evt, req) => {
+      try {
+        const filePath = await this.browserService.takeLikesScreenshot(req.commentUrl, req.postId, req.commentId || req.id || req.comment_id || req, req.snippet);
+        await this.dbService.updateCommentLikesScreenshot(req.commentId || req.id, filePath);
+        this.audit.write('likes_screenshot', { id: req.commentId || req.id, postId: req.postId, path: filePath });
+        return { success: true, screenshotPath: filePath };
+      } catch (error) {
+        this.logger.warn('Likes screenshot failed', { error: error?.message || String(error), id: req.commentId || req.id });
+        return { success: false, error: error?.message || String(error) };
+      }
+    });
+
     // AI Analysis
     ipcMain.handle('ai:analyze-comments', async (_evt, { commentIds, lawText, batchSize }) => {
       try {

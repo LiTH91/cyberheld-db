@@ -47,6 +47,7 @@ class DatabaseService {
         url TEXT NOT NULL,
         timestamp_captured INTEGER NOT NULL,
         screenshot_path TEXT,
+        screenshot_likes_path TEXT,
         metadata TEXT NOT NULL,
         checksum_screenshot TEXT,
         checksum_comment_text TEXT,
@@ -78,6 +79,9 @@ class DatabaseService {
       }
       if (!names.has('last_attempt_at')) {
         this.db.exec('ALTER TABLE comments ADD COLUMN last_attempt_at INTEGER');
+      }
+      if (!names.has('screenshot_likes_path')) {
+        this.db.exec('ALTER TABLE comments ADD COLUMN screenshot_likes_path TEXT');
       }
       // AI analysis related columns
       if (!names.has('is_negative')) {
@@ -249,6 +253,14 @@ class DatabaseService {
     stmt.run(screenshotPath, checksum, now, commentId);
   }
 
+  async updateCommentLikesScreenshot(commentId, screenshotPath) {
+    if (!this.db) throw new Error('Database not initialized');
+    const stmt = this.db.prepare(`
+      UPDATE comments SET screenshot_likes_path = ? WHERE id = ?
+    `);
+    stmt.run(screenshotPath, commentId);
+  }
+
   async recordCommentError(commentId, message) {
     if (!this.db) throw new Error('Database not initialized');
     const now = Date.now();
@@ -284,6 +296,16 @@ class DatabaseService {
       try { fs.unlinkSync(row.screenshot_path); } catch {}
     }
     const stmt = this.db.prepare('UPDATE comments SET screenshot_path = NULL, checksum_screenshot = NULL WHERE id = ?');
+    stmt.run(commentId);
+  }
+
+  async clearCommentLikesScreenshot(commentId) {
+    if (!this.db) throw new Error('Database not initialized');
+    const row = await this.getCommentById(commentId);
+    if (row && row.screenshot_likes_path) {
+      try { fs.unlinkSync(row.screenshot_likes_path); } catch {}
+    }
+    const stmt = this.db.prepare('UPDATE comments SET screenshot_likes_path = NULL WHERE id = ?');
     stmt.run(commentId);
   }
 

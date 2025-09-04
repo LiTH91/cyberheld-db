@@ -80,6 +80,7 @@ cyberheld-db/
     - Scrolling-Screenshot (Top→Kommentar): Vollseitenaufnahme und Zuschnitt vom Seitenanfang bis zum Ende des Ziel-Kommentars
     - Alternativ: gemeinsames Viewport-Fenster aus Post-Header und Kommentar
     - Fallback: FullPage-Screenshot, wenn der Bereich zu groß ist
+  - `takeLikesScreenshot(commentUrl, postId, commentId, snippetText)` – öffnet die Likes-Liste (Dialog), scrollt diese vollständig ab und erstellt einen zusammengesetzten Screenshot (vertikales Stitching)
 - **electron/services/ExportService.js**: Export von JSON und PDF (eingebettete Screenshots, Checksum-Ausgabe)
 - **electron/preload.ts**: Preload Script für sichere IPC-Kommunikation
   - Exports: `window.electronAPI` Interface
@@ -129,6 +130,7 @@ cyberheld-db/
 - `DatabaseService.getComments()` – Kommentare für Post laden
 - `DatabaseService.updateCommentScreenshot()` – Speichert Screenshot-Pfad und SHA256-Checksumme
 - `DatabaseService.updateCommentAiAnalysis()` – Speichert KI-Resultate je Kommentar (`is_negative`, `confidence_score`, `reasoning`, `ai_model`, `ai_analyzed_at`)
+ - `DatabaseService.updateCommentLikesScreenshot()` – Speichert Pfad zum Likes-Screenshot
 
 ### AI-Service (electron/services/AIService.js)
 - Batching bis 100 Kommentare; Short-IDs (`c1..cN`) zur Tokenreduktion
@@ -146,6 +148,7 @@ cyberheld-db/
   - Definiert in: `electron/preload.ts`
   - Verwendet in: `src/app/page.tsx`
   - Methoden: `importJson()`, `getPosts()`, `getComments()`, `selectJsonFile()`
+  - Likes: `takeLikesScreenshot({ postId, commentUrl, commentId, snippet })`
 
 ## Dependencies
 

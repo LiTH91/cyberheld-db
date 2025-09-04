@@ -157,6 +157,178 @@ class BrowserService {
     }
   }
 
+  async takeLikesScreenshot(commentUrl, postId, commentId, snippetText) {
+    if (!this.browser) throw new Error('Browser nicht initialisiert.');
+    const page = await this.browser.newPage();
+    // Set a stable viewport for modal capture
+    await page.setViewport({ width: 1366, height: 900, deviceScaleFactor: 1 });
+    try {
+      await page.setUserAgent(pick(this.userAgents));
+      await page.setExtraHTTPHeaders({ 'accept-language': 'de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7' });
+      try { await page.emulateTimezone('Europe/Berlin'); } catch {}
+
+      await page.goto(commentUrl, { waitUntil: 'networkidle2', timeout: 60_000 });
+      await this.acceptCookieBanner(page);
+      await page.waitForTimeout(600);
+
+      // Focus the target comment to make its actions visible
+      const numericId = this.extractNumericCommentId(commentUrl);
+      if (numericId) {
+        const ok = await this.scrollToComment(page, numericId);
+        if (!ok && snippetText && snippetText.length >= 6) {
+          await this.searchAndFocusBySnippet(page, snippetText);
+        }
+        await page.waitForTimeout(500);
+      }
+
+      // Try to open the likes dialog from within the nearest container
+      const opened = await this.openLikesDialogForComment(page, numericId, snippetText);
+      if (!opened) throw new Error('Likes-Dialog nicht gefunden/öffnen fehlgeschlagen.');
+
+      // Find scrollable container inside dialog
+      const container = await this.findDialogScrollable(page);
+      if (!container) throw new Error('Scroll-Container im Likes-Dialog nicht gefunden.');
+
+      // Capture slices while scrolling to bottom
+      const buffers = [];
+      let lastTop = -1;
+      for (let i = 0; i < 100; i++) {
+        const { top, max, step, atEnd } = await page.evaluate((el) => {
+          const d = el; // dialog scrollable
+          const step = Math.max(200, Math.floor(d.clientHeight * 0.85));
+          const atEnd = d.scrollTop + d.clientHeight >= d.scrollHeight - 4;
+          return { top: d.scrollTop, max: d.scrollHeight, step, atEnd };
+        }, container);
+        // Prevent infinite loop
+        if (top === lastTop && i > 0) break;
+        lastTop = top;
+        // Take slice
+        const buf = await container.screenshot({ type: 'png' });
+        buffers.push(buf);
+        if (buffers.length >= 1 && (await page.evaluate((el)=> el.scrollTop + el.clientHeight >= el.scrollHeight - 2, container))) {
+          break;
+        }
+        // Scroll down
+        await page.evaluate((el, s) => { el.scrollBy(0, s); }, container, Math.max(100, Math.floor(step * 0.9)));
+        await page.waitForTimeout(250);
+        // Stop if end
+        const done = await page.evaluate((el)=> el.scrollTop + el.clientHeight >= el.scrollHeight - 2, container);
+        if (done) {
+          // Final slice at bottom
+          const finalBuf = await container.screenshot({ type: 'png' });
+          buffers.push(finalBuf);
+          break;
+        }
+      }
+
+      if (buffers.length === 0) throw new Error('Keine Slices aufgenommen.');
+
+      // Stitch vertically
+      const userData = app.getPath('userData');
+      const dir = path.join(userData, 'screenshots_likes', postId);
+      fs.ensureDirSync(dir);
+      const filePath = path.join(dir, `${sanitize(commentId)}.png`);
+      const ok = await this.stitchVertical(buffers, filePath);
+      if (!ok) throw new Error('Stitching fehlgeschlagen.');
+      return filePath;
+    } finally {
+      await page.close().catch(() => {});
+    }
+  }
+
+  async openLikesDialogForComment(page, numericId, snippetText) {
+    try {
+      const handle = numericId ? await this.findCommentContainer(page, numericId) : (snippetText ? await this.findContainerBySnippet(page, snippetText) : null);
+      const opened = await page.evaluate((el) => {
+        const scope = el || document;
+        // Common selectors/texts for likes link/button
+        const texts = ['likes', 'gefällt', 'reaktionen', 'reactions', 'people who reacted'];
+        // Prefer clickable anchors/buttons within scope first
+        const candidates = [
+          ...Array.from(scope.querySelectorAll('a,button')),
+          ...Array.from(document.querySelectorAll('div[role="dialog"] a, div[role="dialog"] button')),
+        ];
+        let target = null;
+        for (const b of candidates) {
+          const t = (b.innerText || b.getAttribute('aria-label') || '').toLowerCase();
+          if (t && texts.some(x => t.includes(x))) { target = b; break; }
+          const href = b.getAttribute('href') || '';
+          if (/reaction|ufi|browser/i.test(href)) { target = b; break; }
+        }
+        if (target) {
+          try { target.click(); return true; } catch { return false; }
+        }
+        return false;
+      }, handle);
+      try { if (handle) await handle.dispose(); } catch {}
+      if (!opened) return false;
+      // wait for dialog
+      await page.waitForSelector('div[role="dialog"]', { timeout: 5000 });
+      await page.waitForTimeout(400);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async findDialogScrollable(page) {
+    try {
+      const dlg = await page.$('div[role="dialog"]');
+      if (!dlg) return null;
+      // search inside dialog for first overflowing element
+      const scrollable = await page.evaluateHandle((dialog) => {
+        function find(el) {
+          const els = el.querySelectorAll('*');
+          for (const n of els) {
+            const cs = getComputedStyle(n);
+            const overflowY = cs.overflowY;
+            if (/(auto|scroll)/.test(overflowY) && n.scrollHeight > n.clientHeight + 20) return n;
+          }
+          return null;
+        }
+        return find(dialog);
+      }, dlg);
+      try { await dlg.dispose(); } catch {}
+      return scrollable.asElement();
+    } catch {
+      return null;
+    }
+  }
+
+  async stitchVertical(buffers, outPath) {
+    try {
+      const page = await this.browser.newPage();
+      try {
+        await page.setContent('<html><head><meta charset="utf-8"/></head><body style="margin:0;padding:0;background:#fff"></body></html>');
+        await page.addStyleTag({ content: 'html,body{margin:0;padding:0;} img{display:block;width:100%;height:auto;}' });
+        // Build a simple column of images
+        const dataUrls = buffers.map(b => `data:image/png;base64,${b.toString('base64')}`);
+        await page.evaluate((srcs) => {
+          const cont = document.body;
+          const wrap = document.createElement('div');
+          wrap.style.maxWidth = '600px';
+          wrap.style.margin = '0 auto';
+          for (const s of srcs) {
+            const img = document.createElement('img');
+            img.src = s;
+            cont.appendChild(img);
+          }
+        }, dataUrls);
+        await page.waitForTimeout(100);
+        // Measure total
+        const total = await page.evaluate(() => document.documentElement.scrollHeight || document.body.scrollHeight || 2000);
+        await page.setViewport({ width: 800, height: Math.min(20000, Math.max(400, total)), deviceScaleFactor: 1 });
+        await page.waitForTimeout(50);
+        await page.screenshot({ path: outPath, type: 'png', fullPage: true });
+        return true;
+      } finally {
+        try { await page.close(); } catch {}
+      }
+    } catch {
+      return false;
+    }
+  }
+
   async humanizePage(page) {
     try {
       // Maus bewegen
