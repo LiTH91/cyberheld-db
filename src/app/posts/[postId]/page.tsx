@@ -20,6 +20,7 @@ export default function PostCommentsPage() {
   const [query, setQuery] = useState('');
   const [onlyNoShot, setOnlyNoShot] = useState(false);
   const [onlyError, setOnlyError] = useState(false);
+  const [onlyNegative, setOnlyNegative] = useState(false);
   const [sortKey, setSortKey] = useState<'date'|'likes'|'replies'|'profile'|'neg'|'conf'|'none'>('none');
   const [sortDir, setSortDir] = useState<'asc'|'desc'>('desc');
   const [page, setPage] = useState(1);
@@ -67,6 +68,10 @@ export default function PostCommentsPage() {
         const meta = JSON.parse(c.metadata);
         if (onlyNoShot && c.screenshot_path) return false;
         if (onlyError && !c.last_error) return false;
+        if (onlyNegative) {
+          const neg = (c as any).is_negative === true || (c as any).is_negative === 1;
+          if (!neg) return false;
+        }
         if (!query) return true;
         const q = query.toLowerCase();
         const hay = `${meta.profileName || ''} ${meta.text || ''}`.toLowerCase();
@@ -103,7 +108,7 @@ export default function PostCommentsPage() {
         return (av - bv) * (sortDir === 'asc' ? 1 : -1);
       });
     return list;
-  }, [comments, query, onlyNoShot, onlyError, sortKey, sortDir]);
+  }, [comments, query, onlyNoShot, onlyError, onlyNegative, sortKey, sortDir]);
 
   const total = filteredSorted.length;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
@@ -398,6 +403,10 @@ export default function PostCommentsPage() {
                   <label className="inline-flex items-center gap-2 text-sm">
                     <input type="checkbox" checked={onlyError} onChange={(e) => setOnlyError(e.target.checked)} />
                     nur Fehler
+                  </label>
+                  <label className="inline-flex items-center gap-2 text-sm">
+                    <input type="checkbox" checked={onlyNegative} onChange={(e) => setOnlyNegative(e.target.checked)} />
+                    nur negativ
                   </label>
                   <label className="inline-flex items-center gap-2 text-sm">
                     <input type="checkbox" checked={highlightRows} onChange={(e) => setHighlightRows(e.target.checked)} />
