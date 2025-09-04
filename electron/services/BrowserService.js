@@ -194,15 +194,40 @@ class BrowserService {
 
       // Find scrollable container inside dialog
       let container = await this.findDialogScrollable(page);
-      // Probe to refine the actual scrollable child element
+      // One-time probe to refine the actual inner scrollable element. We will **not** switch afterwards so
+      // that before/after scrollTop and slices always refer to the same element.
       try {
-        const probed0 = await this.findDialogScrollableByProbe(page);
-        if (probed0) {
-          container = probed0;
+        const refined = await this.findDialogScrollableByProbe(page);
+        if (refined) {
+          container = refined;
           console.log('[likes] probe selected initial container');
         }
       } catch {}
       if (!container) throw new Error('Scroll-Container im Likes-Dialog nicht gefunden.');
+      const mainContainer = container; // pin for the rest of the function
+
+      // Try to detect inner transform container that actually holds the items (virtual list)
+      let targetContainer = mainContainer;
+      try {
+        const inner = await page.evaluateHandle((outer) => {
+          // Heuristic: direct child having transform style and taller scrollHeight
+          const candidates = Array.from(outer.querySelectorAll(':scope > div'));
+          let best = null; let bestScore = -1;
+          for (const el of candidates) {
+            const dh = el.scrollHeight - el.clientHeight;
+            const hasTransform = (el.style.transform || '').includes('translate');
+            const score = (hasTransform ? 5000 : 0) + Math.max(0, dh);
+            if (score > bestScore) { bestScore = score; best = el; }
+          }
+          return best || null;
+        }, mainContainer);
+        if (inner) {
+          targetContainer = inner.asElement() || mainContainer;
+          console.log('[likes] detected innerContainer');
+        }
+      } catch {
+        targetContainer = mainContainer;
+      }
 
       // Phase 1: Preload entire list by scrolling to bottom until scrollHeight stabilizes
       try {
@@ -211,114 +236,133 @@ class BrowserService {
         const startMs = Date.now();
         const maxMs = 15000; // 15s preload cap
         for (let i = 0; i < 200; i++) {
-          const h = await page.evaluate((el) => el.scrollHeight, container);
+          const h = await page.evaluate((el) => el.scrollHeight, mainContainer);
           console.log('[likes] preload', i, 'scrollHeight=', h);
           if (h === lastH) stable++; else stable = 0;
           lastH = h;
           if (stable >= 3) break; // considered fully loaded
           if (Date.now() - startMs > maxMs) { console.log('[likes] preload timeout'); break; }
-          await page.evaluate((el) => el.scrollTo(0, el.scrollHeight), container);
+          const delta = Math.max(300, Math.floor(box.height * 0.8));
+          await page.evaluate((el, dy) => { el.scrollTop = el.scrollTop + dy; }, mainContainer, delta);
           await page.waitForTimeout(300);
         }
         // return to top for capture
-        await page.evaluate((el) => el.scrollTo(0, 0), container);
+        await page.evaluate((el) => el.scrollTo(0, 0), mainContainer);
         await page.waitForTimeout(200);
       } catch {}
 
       // Ensure container can receive focus and wheel events
-      try { await page.evaluate((el) => { try { el.tabIndex = -1; el.focus(); } catch {} }, container); } catch {}
+      try { await page.evaluate((el) => { try { el.tabIndex = -1; el.focus(); } catch {} }, mainContainer); } catch {}
 
       // Measure geometry
-      const box = await container.boundingBox();
+      const box = await mainContainer.boundingBox();
       if (!box) throw new Error('BoundingBox für Likes-Container fehlgeschlagen.');
+
+      // Prefer explicit list/feed element within dialog for scrolling
+      let listEl = null;
+      try {
+        const h = await page.$('div[role="dialog"] [role="list"], div[role="dialog"] [role="feed"]');
+        if (h) listEl = h;
+      } catch {}
+      const scrollEl = listEl || mainContainer;
+      const shotEl = listEl || mainContainer;
+
+      // Stitching approach: capture the list/feed (or scroll container) itself after each scroll step
       const buffers = [];
-      const overlapPx = 60; // visual seam overlap to avoid gaps
+      const overlapPx = 60;
 
-      // Dynamic full scroll with fixed clip slices
+      // Ensure focus so PageDown/ArrowDown affect the list
+      try { await page.evaluate((el)=>{ el.tabIndex = -1; el.focus(); }, scrollEl); } catch {}
+
+      // Prepare CDP client for precise wheel events
+      let cdp = null;
+      try { cdp = await page.target().createCDPSession(); } catch {}
+
+      // Try to find an inner element that moves via CSS transform (virtualized lists)
+      let innerTransformEl = null;
+      try {
+        const h = await page.evaluateHandle((outer) => {
+          const candidates = Array.from(outer.querySelectorAll(':scope > div, :scope > * > div'));
+          for (const n of candidates) {
+            const t = getComputedStyle(n).transform;
+            if (t && t !== 'none') return n;
+          }
+          return null;
+        }, scrollEl);
+        innerTransformEl = h?.asElement() || null;
+      } catch {}
+
       let guard = 0;
-      let repeated = 0; let prevHash = '';
-      while (guard++ < 300) {
-        // Re-probe each loop to stick to the real scrollable node in virtualized lists
-        try {
-          const probed = await this.findDialogScrollableByProbe(page);
-          if (probed) { container = probed; console.log('[likes] probe switched container (pre)'); }
-        } catch {}
-        const bx = await container.boundingBox();
-        if (!bx) break;
-        box.x = bx.x; box.y = bx.y; box.width = bx.width; box.height = bx.height;
+      let lastHash = '';
+      let repeats = 0;
+      while (guard++ < 200) {
+        // capture current view
+        const buf = await shotEl.screenshot({ type: 'png' });
+        const hash = crypto.createHash('sha1').update(buf).digest('hex');
+        const scrollTopNow = await page.evaluate((el)=>el.scrollTop, scrollEl);
+        const transformY = innerTransformEl ? await page.evaluate((el)=>{
+          const t = getComputedStyle(el).transform;
+          if (!t || t === 'none') return 0;
+          const parts = t.includes('matrix3d') ? t.replace('matrix3d(','').replace(')','').split(',') : t.replace('matrix(','').replace(')','').split(',');
+          const idx = parts.length > 6 ? 13 : 5;
+          const val = parseFloat(parts[idx]);
+          return isNaN(val) ? 0 : val;
+        }, innerTransformEl) : 0;
+        console.log('[likes] slice', buffers.length, 'scrollTop=', scrollTopNow, 'transformY=', transformY, 'hash=', hash);
+        if (hash !== lastHash) buffers.push(buf); else console.log('[likes] skipped duplicate slice');
+        if (hash === lastHash) repeats++; else repeats = 0;
+        lastHash = hash;
 
-        // Relative scroll by viewport height minus overlap
-        const beforeTop = await page.evaluate((el) => el.scrollTop, container);
-        await page.evaluate((el, dy) => { el.scrollBy(0, dy); }, container, Math.max(300, Math.floor(box.height * 0.8)));
-        await page.waitForTimeout(250);
-        let afterTop = await page.evaluate((el) => el.scrollTop, container);
-        if (Math.abs(afterTop - beforeTop) < 2) {
-          // Probe for the actual scrollable child element
+        // advance
+        const before = await page.evaluate((el)=>({ top: el.scrollTop, client: el.clientHeight, scroll: el.scrollHeight }), scrollEl);
+        const step = Math.max(300, Math.floor(before.client * 0.85));
+        // primary: CDP wheel at container center
+        const bb = await scrollEl.boundingBox();
+        if (cdp && bb) {
           try {
-            const probed = await this.findDialogScrollableByProbe(page);
-            if (probed) { console.log('[likes] probe switched container'); container = probed; }
-            afterTop = await page.evaluate((el) => el.scrollTop, container);
+            await cdp.send('Input.dispatchMouseWheelEvent', {
+              x: Math.round(bb.x + bb.width/2),
+              y: Math.round(bb.y + Math.min(bb.height-5, 200)),
+              deltaY: Math.max(1000, Math.floor(bb.height*1.3)),
+              pointerType: 'mouse'
+            });
           } catch {}
+        } else {
+          await page.evaluate((el, dy)=>{ el.scrollTop = Math.min(el.scrollTop + dy, el.scrollHeight); }, scrollEl, step);
         }
-        if (Math.abs(afterTop - beforeTop) < 2) {
-          // Fallback 1: mouse wheel at container center to trigger virtualized lists
-          const bb = await container.boundingBox();
+        await page.waitForTimeout(120);
+        let after = await page.evaluate((el)=>({ top: el.scrollTop, client: el.clientHeight, scroll: el.scrollHeight }), scrollEl);
+
+        if (Math.abs(after.top - before.top) < 2) {
+          // wheel fallback
           if (bb) {
-            await page.mouse.move(Math.round(bb.x + bb.width / 2), Math.round(bb.y + Math.min(bb.height - 5, 200)));
-            await page.mouse.wheel({ deltaY: Math.max(900, Math.floor(bb.height * 1.6)) });
-            console.log('[likes] wheel fallback fired');
-            await page.waitForTimeout(350);
-            afterTop = await page.evaluate((el) => el.scrollTop, container);
+            await page.mouse.move(Math.round(bb.x + bb.width/2), Math.round(bb.y + Math.min(bb.height-5, 200)));
+            await page.mouse.wheel({ deltaY: Math.max(900, Math.floor(bb.height*1.5)) });
+            await page.waitForTimeout(120);
+            after = await page.evaluate((el)=>({ top: el.scrollTop, client: el.clientHeight, scroll: el.scrollHeight }), scrollEl);
           }
         }
-        if (Math.abs(afterTop - beforeTop) < 2) {
-          // Fallback 2: dispatch wheel event in DOM
-          await page.evaluate((el) => {
-            try { el.dispatchEvent(new WheelEvent('wheel', { deltaY: 1200, bubbles: true, cancelable: true })); } catch {}
-          }, container);
-          console.log('[likes] dom wheel fallback fired');
-          await page.waitForTimeout(300);
-          afterTop = await page.evaluate((el) => el.scrollTop, container);
+        if (Math.abs(after.top - before.top) < 2) {
+          await page.evaluate((el)=>{ try { el.dispatchEvent(new WheelEvent('wheel', { deltaY: 1200, bubbles: true })); } catch {} }, scrollEl);
+          await page.waitForTimeout(100);
+          after = await page.evaluate((el)=>({ top: el.scrollTop, client: el.clientHeight, scroll: el.scrollHeight }), scrollEl);
         }
-        if (Math.abs(afterTop - beforeTop) < 2) {
-          // Fallback 3: keyboard PageDown/ArrowDown
+        if (Math.abs(after.top - before.top) < 2) {
           try { await page.keyboard.press('PageDown'); } catch {}
-          await page.waitForTimeout(200);
-          try { await page.keyboard.down('ArrowDown'); await page.waitForTimeout(120); await page.keyboard.up('ArrowDown'); } catch {}
-          await page.waitForTimeout(200);
-          console.log('[likes] keyboard fallback fired');
-          afterTop = await page.evaluate((el) => el.scrollTop, container);
+          await page.waitForTimeout(100);
+          try { await page.keyboard.down('ArrowDown'); await page.waitForTimeout(80); await page.keyboard.up('ArrowDown'); } catch {}
+          after = await page.evaluate((el)=>({ top: el.scrollTop, client: el.clientHeight, scroll: el.scrollHeight }), scrollEl);
         }
-        console.log('[likes] progress', { beforeTop, afterTop });
+        console.log('[likes] progress', { beforeTop: before.top, afterTop: after.top });
 
-        // Capture visible portion of the scroll container
-        const isFirst = buffers.length === 0;
-        const buf = await container.screenshot({ type: 'png' });
-        const hash = crypto.createHash('sha1').update(buf).digest('hex');
-        console.log('[likes] slice', buffers.length, 'scrollTop=', await page.evaluate((el)=>el.scrollTop, container), 'hash=', hash);
-        if (hash === prevHash) { repeated++; } else { repeated = 0; }
-        prevHash = hash;
-        buffers.push(buf);
-
-        // End condition and lazy-load wait
-        const metrics = await page.evaluate((el) => ({ top: el.scrollTop, client: el.clientHeight, scroll: el.scrollHeight }), container);
-        const atEnd = metrics.top + metrics.client >= metrics.scroll - 2;
+        const atEnd = after.top + after.client >= after.scroll - 2;
         if (atEnd) break;
-        // Allow lazy items to render (wait until scrollHeight stabilizes or increases)
-        const before = metrics.scroll;
-        const t0 = Date.now();
-        while (Date.now() - t0 < 1200) {
-          const now = await page.evaluate((el) => el.scrollHeight, container);
-          if (now > before) break;
-          await page.waitForTimeout(120);
-        }
-
-        if (repeated >= 3) { console.log('[likes] breaking due to repeated identical slices'); break; }
+        if (repeats >= 3) { console.log('[likes] repeated identical slices – stop'); break; }
       }
 
-      if (buffers.length === 0) throw new Error('Keine Slices aufgenommen.');
+      if (!buffers.length) throw new Error('Keine Slices aufgenommen.');
 
-      // Stitch vertically
+      // Stitch vertically into final image
       const userData = app.getPath('userData');
       const dir = path.join(userData, 'screenshots_likes', postId);
       fs.ensureDirSync(dir);
@@ -338,7 +382,7 @@ class BrowserService {
         const scope = el || document;
         const debug = { stage: 'scan', tried: 0, matched: 0 };
         // Common selectors/texts for likes link/button
-        const texts = ['likes', 'gefällt', 'gef e4llt', 'reaktionen', 'reactions', 'people who reacted', 'personen die reagiert', 'personen reagiert'];
+        const texts = ['likes', 'gefällt', 'gef 4llt', 'reaktionen', 'reactions', 'people who reacted', 'personen die reagiert', 'personen reagiert'];
 
         function collectCandidates(root) {
           const arr = [];
@@ -1225,5 +1269,6 @@ function pick(arr) {
 }
 
 module.exports = { BrowserService };
+
 
 
