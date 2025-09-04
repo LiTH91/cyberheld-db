@@ -75,7 +75,10 @@ cyberheld-db/
   - IPC Channels: Import, Posts abrufen, Kommentare abrufen, Datei-Dialoge
 - **electron/services/BrowserService.js**: Puppeteer + Stealth gesteuerter Browser-Service für Screenshots
   - `initBrowser(headless)` – initialisiert einen persistenten Browser
-  - `takeScreenshot(commentUrl, postId, commentId)` – erstellt FullPage-Screenshot und gibt Pfad zurück
+  - `takeScreenshot(commentUrl, postId, commentId, snippetText)` – erstellt Screenshot mit Beweisfokus:
+    - Scrolling-Screenshot (Top→Kommentar): Vollseitenaufnahme und Zuschnitt vom Seitenanfang bis zum Ende des Ziel-Kommentars
+    - Alternativ: gemeinsames Viewport-Fenster aus Post-Header und Kommentar
+    - Fallback: FullPage-Screenshot, wenn der Bereich zu groß ist
 - **electron/services/ExportService.js**: Export von JSON und PDF (eingebettete Screenshots, Checksum-Ausgabe)
 - **electron/preload.ts**: Preload Script für sichere IPC-Kommunikation
   - Exports: `window.electronAPI` Interface
