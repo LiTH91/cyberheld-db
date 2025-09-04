@@ -193,7 +193,7 @@ class BrowserService {
       if (!opened) throw new Error('Likes-Dialog nicht gefunden/öffnen fehlgeschlagen.');
 
       // Find scrollable container inside dialog
-      const container = await this.findDialogScrollable(page);
+      let container = await this.findDialogScrollable(page);
       if (!container) throw new Error('Scroll-Container im Likes-Dialog nicht gefunden.');
 
       // Phase 1: Preload entire list by scrolling to bottom until scrollHeight stabilizes
@@ -242,11 +242,20 @@ class BrowserService {
         await page.waitForTimeout(250);
         let afterTop = await page.evaluate((el) => el.scrollTop, container);
         if (Math.abs(afterTop - beforeTop) < 2) {
+          // Probe for the actual scrollable child element
+          try {
+            const probed = await this.findDialogScrollableByProbe(page);
+            if (probed) { console.log('[likes] probe switched container'); container = probed; }
+            afterTop = await page.evaluate((el) => el.scrollTop, container);
+          } catch {}
+        }
+        if (Math.abs(afterTop - beforeTop) < 2) {
           // Fallback 1: mouse wheel at container center to trigger virtualized lists
           const bb = await container.boundingBox();
           if (bb) {
             await page.mouse.move(Math.round(bb.x + bb.width / 2), Math.round(bb.y + Math.min(bb.height - 5, 200)));
-            await page.mouse.wheel({ deltaY: Math.max(600, Math.floor(bb.height * 1.2)) });
+            await page.mouse.wheel({ deltaY: Math.max(900, Math.floor(bb.height * 1.6)) });
+            console.log('[likes] wheel fallback fired');
             await page.waitForTimeout(350);
             afterTop = await page.evaluate((el) => el.scrollTop, container);
           }
@@ -256,6 +265,7 @@ class BrowserService {
           await page.evaluate((el) => {
             try { el.dispatchEvent(new WheelEvent('wheel', { deltaY: 1200, bubbles: true, cancelable: true })); } catch {}
           }, container);
+          console.log('[likes] dom wheel fallback fired');
           await page.waitForTimeout(300);
           afterTop = await page.evaluate((el) => el.scrollTop, container);
         }
@@ -265,6 +275,7 @@ class BrowserService {
           await page.waitForTimeout(200);
           try { await page.keyboard.down('ArrowDown'); await page.waitForTimeout(120); await page.keyboard.up('ArrowDown'); } catch {}
           await page.waitForTimeout(200);
+          console.log('[likes] keyboard fallback fired');
           afterTop = await page.evaluate((el) => el.scrollTop, container);
         }
         console.log('[likes] progress', { beforeTop, afterTop });
@@ -409,6 +420,35 @@ class BrowserService {
       }, dlg);
       try { await dlg.dispose(); } catch {}
       return scrollable.asElement();
+    } catch {
+      return null;
+    }
+  }
+
+  async findDialogScrollableByProbe(page) {
+    try {
+      const dlg = await page.$('div[role="dialog"]');
+      if (!dlg) return null;
+      const indexes = await page.evaluate((dialog) => {
+        const nodes = Array.from(dialog.querySelectorAll('*'));
+        let bestIdx = -1; let bestScore = -1;
+        nodes.forEach((n, idx) => {
+          const cs = getComputedStyle(n);
+          const hasOverflow = /auto|scroll/.test(cs.overflowY);
+          const dh = n.scrollHeight - n.clientHeight;
+          const isRoleList = n.getAttribute('role') === 'list' || n.getAttribute('role') === 'feed';
+          const score = (hasOverflow ? 1000 : 0) + (isRoleList ? 500 : 0) + Math.max(0, dh);
+          if (dh > 10 && score > bestScore) { bestScore = score; bestIdx = idx; }
+        });
+        return { bestIdx };
+      }, dlg);
+      if (indexes && indexes.bestIdx >= 0) {
+        const all = await page.$$('div[role="dialog"] *');
+        try { await dlg.dispose(); } catch {}
+        return all[indexes.bestIdx] || null;
+      }
+      try { await dlg.dispose(); } catch {}
+      return null;
     } catch {
       return null;
     }
