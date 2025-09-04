@@ -1,6 +1,7 @@
 const path = require('path');
 const fs = require('fs-extra');
 const os = require('os');
+const crypto = require('crypto');
 const { app, safeStorage } = require('electron');
 
 const puppeteerExtra = require('puppeteer-extra');
@@ -195,36 +196,102 @@ class BrowserService {
       const container = await this.findDialogScrollable(page);
       if (!container) throw new Error('Scroll-Container im Likes-Dialog nicht gefunden.');
 
-      // Capture slices while scrolling to bottom
+      // Phase 1: Preload entire list by scrolling to bottom until scrollHeight stabilizes
+      try {
+        let stable = 0;
+        let lastH = -1;
+        const startMs = Date.now();
+        const maxMs = 15000; // 15s preload cap
+        for (let i = 0; i < 200; i++) {
+          const h = await page.evaluate((el) => el.scrollHeight, container);
+          console.log('[likes] preload', i, 'scrollHeight=', h);
+          if (h === lastH) stable++; else stable = 0;
+          lastH = h;
+          if (stable >= 3) break; // considered fully loaded
+          if (Date.now() - startMs > maxMs) { console.log('[likes] preload timeout'); break; }
+          await page.evaluate((el) => el.scrollTo(0, el.scrollHeight), container);
+          await page.waitForTimeout(300);
+        }
+        // return to top for capture
+        await page.evaluate((el) => el.scrollTo(0, 0), container);
+        await page.waitForTimeout(200);
+      } catch {}
+
+      // Ensure container can receive focus and wheel events
+      try { await page.evaluate((el) => { try { el.tabIndex = -1; el.focus(); } catch {} }, container); } catch {}
+
+      // Measure geometry
+      const box = await container.boundingBox();
+      if (!box) throw new Error('BoundingBox für Likes-Container fehlgeschlagen.');
       const buffers = [];
-      let lastTop = -1;
-      for (let i = 0; i < 100; i++) {
-        const { top, max, step, atEnd } = await page.evaluate((el) => {
-          const d = el; // dialog scrollable
-          const step = Math.max(200, Math.floor(d.clientHeight * 0.85));
-          const atEnd = d.scrollTop + d.clientHeight >= d.scrollHeight - 4;
-          return { top: d.scrollTop, max: d.scrollHeight, step, atEnd };
-        }, container);
-        // Prevent infinite loop
-        if (top === lastTop && i > 0) break;
-        lastTop = top;
-        // Take slice
-        const buf = await container.screenshot({ type: 'png' });
-        buffers.push(buf);
-        if (buffers.length >= 1 && (await page.evaluate((el)=> el.scrollTop + el.clientHeight >= el.scrollHeight - 2, container))) {
-          break;
-        }
-        // Scroll down
-        await page.evaluate((el, s) => { el.scrollBy(0, s); }, container, Math.max(100, Math.floor(step * 0.9)));
+      const overlapPx = 60; // visual seam overlap to avoid gaps
+
+      // Dynamic full scroll with fixed clip slices
+      let guard = 0;
+      let repeated = 0; let prevHash = '';
+      while (guard++ < 300) {
+        // Re-acquire potential virtualized container and fresh box each loop
+        try { const c2 = await this.findDialogScrollable(page); if (c2) container = c2; } catch {}
+        const bx = await container.boundingBox();
+        if (!bx) break;
+        box.x = bx.x; box.y = bx.y; box.width = bx.width; box.height = bx.height;
+
+        // Relative scroll by viewport height minus overlap
+        const beforeTop = await page.evaluate((el) => el.scrollTop, container);
+        await page.evaluate((el, dy) => { el.scrollBy(0, dy); }, container, Math.max(300, Math.floor(box.height * 0.8)));
         await page.waitForTimeout(250);
-        // Stop if end
-        const done = await page.evaluate((el)=> el.scrollTop + el.clientHeight >= el.scrollHeight - 2, container);
-        if (done) {
-          // Final slice at bottom
-          const finalBuf = await container.screenshot({ type: 'png' });
-          buffers.push(finalBuf);
-          break;
+        let afterTop = await page.evaluate((el) => el.scrollTop, container);
+        if (Math.abs(afterTop - beforeTop) < 2) {
+          // Fallback 1: mouse wheel at container center to trigger virtualized lists
+          const bb = await container.boundingBox();
+          if (bb) {
+            await page.mouse.move(Math.round(bb.x + bb.width / 2), Math.round(bb.y + Math.min(bb.height - 5, 200)));
+            await page.mouse.wheel({ deltaY: Math.max(600, Math.floor(bb.height * 1.2)) });
+            await page.waitForTimeout(350);
+            afterTop = await page.evaluate((el) => el.scrollTop, container);
+          }
         }
+        if (Math.abs(afterTop - beforeTop) < 2) {
+          // Fallback 2: dispatch wheel event in DOM
+          await page.evaluate((el) => {
+            try { el.dispatchEvent(new WheelEvent('wheel', { deltaY: 1200, bubbles: true, cancelable: true })); } catch {}
+          }, container);
+          await page.waitForTimeout(300);
+          afterTop = await page.evaluate((el) => el.scrollTop, container);
+        }
+        if (Math.abs(afterTop - beforeTop) < 2) {
+          // Fallback 3: keyboard PageDown/ArrowDown
+          try { await page.keyboard.press('PageDown'); } catch {}
+          await page.waitForTimeout(200);
+          try { await page.keyboard.down('ArrowDown'); await page.waitForTimeout(120); await page.keyboard.up('ArrowDown'); } catch {}
+          await page.waitForTimeout(200);
+          afterTop = await page.evaluate((el) => el.scrollTop, container);
+        }
+        console.log('[likes] progress', { beforeTop, afterTop });
+
+        // Capture visible portion of the scroll container
+        const isFirst = buffers.length === 0;
+        const buf = await container.screenshot({ type: 'png' });
+        const hash = crypto.createHash('sha1').update(buf).digest('hex');
+        console.log('[likes] slice', buffers.length, 'scrollTop=', await page.evaluate((el)=>el.scrollTop, container), 'hash=', hash);
+        if (hash === prevHash) { repeated++; } else { repeated = 0; }
+        prevHash = hash;
+        buffers.push(buf);
+
+        // End condition and lazy-load wait
+        const metrics = await page.evaluate((el) => ({ top: el.scrollTop, client: el.clientHeight, scroll: el.scrollHeight }), container);
+        const atEnd = metrics.top + metrics.client >= metrics.scroll - 2;
+        if (atEnd) break;
+        // Allow lazy items to render (wait until scrollHeight stabilizes or increases)
+        const before = metrics.scroll;
+        const t0 = Date.now();
+        while (Date.now() - t0 < 1200) {
+          const now = await page.evaluate((el) => el.scrollHeight, container);
+          if (now > before) break;
+          await page.waitForTimeout(120);
+        }
+
+        if (repeated >= 3) { console.log('[likes] breaking due to repeated identical slices'); break; }
       }
 
       if (buffers.length === 0) throw new Error('Keine Slices aufgenommen.');
@@ -234,7 +301,7 @@ class BrowserService {
       const dir = path.join(userData, 'screenshots_likes', postId);
       fs.ensureDirSync(dir);
       const filePath = path.join(dir, `${sanitize(commentId)}.png`);
-      const ok = await this.stitchVertical(buffers, filePath);
+      const ok = await this.stitchVertical(buffers, filePath, overlapPx);
       if (!ok) throw new Error('Stitching fehlgeschlagen.');
       return filePath;
     } finally {
@@ -326,16 +393,19 @@ class BrowserService {
       if (!dlg) return null;
       // search inside dialog for first overflowing element
       const scrollable = await page.evaluateHandle((dialog) => {
-        function find(el) {
-          const els = el.querySelectorAll('*');
-          for (const n of els) {
-            const cs = getComputedStyle(n);
-            const overflowY = cs.overflowY;
-            if (/(auto|scroll)/.test(overflowY) && n.scrollHeight > n.clientHeight + 20) return n;
+        let best = null; let bestScore = -1;
+        const els = dialog.querySelectorAll('*');
+        for (const n of els) {
+          const cs = getComputedStyle(n);
+          const overflowY = cs.overflowY;
+          const dh = n.scrollHeight - n.clientHeight;
+          const isRoleList = n.getAttribute('role') === 'list' || n.getAttribute('role') === 'feed';
+          if ((/(auto|scroll)/.test(overflowY) || isRoleList) && dh > 10) {
+            const score = dh + (isRoleList ? 500 : 0);
+            if (score > bestScore) { bestScore = score; best = n; }
           }
-          return null;
         }
-        return find(dialog);
+        return best;
       }, dlg);
       try { await dlg.dispose(); } catch {}
       return scrollable.asElement();
@@ -344,31 +414,49 @@ class BrowserService {
     }
   }
 
-  async stitchVertical(buffers, outPath) {
+  async stitchVertical(buffers, outPath, overlapPx = 0) {
     try {
       const page = await this.browser.newPage();
       try {
         await page.setContent('<html><head><meta charset="utf-8"/></head><body style="margin:0;padding:0;background:#fff"></body></html>');
-        await page.addStyleTag({ content: 'html,body{margin:0;padding:0;} img{display:block;width:100%;height:auto;}' });
-        // Build a simple column of images
         const dataUrls = buffers.map(b => `data:image/png;base64,${b.toString('base64')}`);
-        await page.evaluate((srcs) => {
-          const cont = document.body;
-          const wrap = document.createElement('div');
-          wrap.style.maxWidth = '600px';
-          wrap.style.margin = '0 auto';
-          for (const s of srcs) {
-            const img = document.createElement('img');
-            img.src = s;
-            cont.appendChild(img);
+        const stitched = await page.evaluate(async (srcs, overlap) => {
+          function load(src) {
+            return new Promise((resolve, reject) => {
+              const img = new Image();
+              img.onload = () => resolve(img);
+              img.onerror = reject;
+              img.src = src;
+            });
           }
-        }, dataUrls);
-        await page.waitForTimeout(100);
-        // Measure total
-        const total = await page.evaluate(() => document.documentElement.scrollHeight || document.body.scrollHeight || 2000);
-        await page.setViewport({ width: 800, height: Math.min(20000, Math.max(400, total)), deviceScaleFactor: 1 });
-        await page.waitForTimeout(50);
-        await page.screenshot({ path: outPath, type: 'png', fullPage: true });
+          const imgs = [];
+          for (const s of srcs) { imgs.push(await load(s)); }
+          const width = Math.max(...imgs.map(i => i.width));
+          const totalHeight = imgs.reduce((acc, img, idx) => acc + (idx === 0 ? img.height : Math.max(0, img.height - overlap)), 0);
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = totalHeight;
+          const ctx = canvas.getContext('2d');
+          let y = 0;
+          for (let i = 0; i < imgs.length; i++) {
+            const img = imgs[i];
+            if (i === 0) {
+              ctx.drawImage(img, 0, 0);
+              y += img.height;
+            } else {
+              const sy = Math.min(overlap, img.height - 1);
+              const sh = img.height - sy;
+              ctx.drawImage(img, 0, sy, img.width, sh, 0, y - overlap, img.width, sh);
+              y += sh;
+            }
+          }
+          return canvas.toDataURL('image/png');
+        }, dataUrls, overlapPx);
+
+        // Write the stitched image
+        const base64 = stitched.split(',')[1];
+        const buf = Buffer.from(base64, 'base64');
+        fs.writeFileSync(outPath, buf);
         return true;
       } finally {
         try { await page.close(); } catch {}
