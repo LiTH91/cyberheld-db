@@ -83,6 +83,8 @@ cyberheld-db/
   - `takeLikesScreenshot(commentUrl, postId, commentId, snippetText, options)` – öffnet die Likes-Liste (Dialog), scrollt diese vollständig ab und erstellt einen zusammengesetzten Screenshot (vertikales Stitching). Optionen:
     - `addCounterOverlay` (bool): Zeichnet ein Overlay „Namen gesichtet: N“ in das Endbild
     - `secondBottomPass` (bool): Führt nach dem ersten Durchlauf einen zusätzlichen „Second-Bottom-Pass“ aus, um spätes Laden von Namen zu triggern
+    - `extractLikers` (bool): Extrahiert Profil-URLs und Namen der Liker aus dem offenen Dialog; speichert JSON unter `screenshots_likes/<postId>/<commentId>.likers.json` und liefert den Pfad zurück
+  - `extractAllLikersMobile(commentUrl, postId, commentId)` – nutzt die mobile Reactions-Browser-Seite (`m.facebook.com`) mit Pagination („Mehr/Next“) und sammelt alle Liker (dedupliziert). Speichert unter `screenshots_likes/<postId>/<commentId>.likers.all.json`.
 - **electron/services/ExportService.js**: Export von JSON und PDF (eingebettete Screenshots, Checksum-Ausgabe)
 - **electron/preload.ts**: Preload Script für sichere IPC-Kommunikation
   - Exports: `window.electronAPI` Interface

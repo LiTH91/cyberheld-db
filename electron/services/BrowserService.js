@@ -158,7 +158,7 @@ class BrowserService {
     }
   }
 
-  async takeLikesScreenshot(commentUrl, postId, commentId, snippetText, options = {}) {
+  async takeLikesScreenshot(commentUrl, postId, commentId, snippetText = '', options = {}) {
     if (!this.browser) throw new Error('Browser nicht initialisiert.');
     const page = await this.browser.newPage();
     // Set a stable viewport for modal capture
@@ -189,7 +189,72 @@ class BrowserService {
       }
 
       // Try to open the likes dialog from within the nearest container
-      const opened = await this.openLikesDialogForComment(page, numericId, snippetText);
+      let opened = await this.openLikesDialogForComment(page, numericId, snippetText);
+
+      // Variant 5: direct reaction browser link as fallback
+      if (!opened && options.extractLikers) {
+        try {
+          const href = await page.evaluate((cid) => {
+            const root = document.querySelector(`div[data-commentid="${cid}"]`) || document;
+            if (!root) return null;
+            const a = root.querySelector('a[href*="/ufi/reaction"][href*="profile/browser"]');
+            return a ? a.href : null;
+          }, numericId);
+
+          if (href) {
+            const p2 = await page.browser().newPage();
+            await p2.setJavaScriptEnabled(false);
+            await p2.setCookie(...await page.cookies()); // copy session cookies
+
+            const collected = [];
+            const seen = new Set();
+            let nextUrl = href;
+            let pageCount = 0;
+
+            while (nextUrl && pageCount < 50) {
+              pageCount++;
+              await p2.goto(nextUrl, { waitUntil: 'networkidle2', timeout: 20000 });
+              const { entries, next } = await p2.evaluate(() => {
+                function abs(u){try{return new URL(u, location.origin).href;}catch{return u;}}
+                const out = [];
+                // Desktop/mobile fallback: beide Varianten berücksichtigen
+                const anchors = Array.from(document.querySelectorAll('a[href][data-hovercard], a[href][data-lynx-mode]'));
+                for (const a of anchors) {
+                  const url = abs(a.getAttribute('href'));
+                  const name = (a.innerText || '').trim();
+                  if (url && name && name.length > 0) out.push({ name, profileUrl: url });
+                }
+                // Next/Mehr Link finden
+                let nextHref = null;
+                const more = document.querySelector('#m_more_item a[href], a[rel="next"]');
+                if (more) nextHref = abs(more.getAttribute('href'));
+                return { entries: out, next: nextHref };
+              });
+
+              for (const e of entries) {
+                if (!e || !e.profileUrl) continue;
+                const key = e.profileUrl;
+                if (!seen.has(key)) { seen.add(key); collected.push(e); }
+              }
+              nextUrl = next;
+            }
+
+            await p2.close();
+
+            if (collected.length) {
+              const userData = app.getPath('userData');
+              const dir = path.join(userData, 'screenshots_likes', postId);
+              fs.ensureDirSync(dir);
+              const likersJsonPath = path.join(dir, `${sanitize(commentId)}.likers.json`);
+              fs.writeFileSync(likersJsonPath, JSON.stringify({ postId, commentId, count: collected.length, likers: collected }, null, 2));
+              console.log('[likes] variant5 extracted (paginated)', collected.length, 'likers', 'pages:', pageCount);
+              return { screenshotPath: null, likersJsonPath };
+            }
+          }
+        } catch(err) { console.warn('[likes] variant5 failed', err.message); }
+        // If extraction succeeded, we returned above; otherwise continue with error
+      }
+
       if (!opened) throw new Error('Likes-Dialog nicht gefunden/öffnen fehlgeschlagen.');
 
       // Find scrollable container inside dialog
@@ -272,6 +337,7 @@ class BrowserService {
       const overlapPx = 60;
       const addCounterOverlay = !!options.addCounterOverlay;
       const secondBottomPass = !!options.secondBottomPass;
+      const extractLikers = !!options.extractLikers;
       const seenKeys = new Set();
 
       // Ensure focus so PageDown/ArrowDown affect the list
@@ -440,90 +506,201 @@ class BrowserService {
       const dir = path.join(userData, 'screenshots_likes', postId);
       fs.ensureDirSync(dir);
       const filePath = path.join(dir, `${sanitize(commentId)}.png`);
+
+      // Optional: extract likers profile links and names from the open dialog
+      let likersJsonPath = null;
+      if (extractLikers) {
+        try {
+          // Ensure bottom-stable: try to reach the bottom and wait until scrollHeight stabilizes
+          await page.evaluate(async () => {
+            const dlg = document.querySelector('div[role="dialog"]');
+            if (!dlg) return;
+            // pick scrollable list/feed inside dialog
+            let container = dlg.querySelector('[role="list"], [role="feed"], [data-visualcompletion="list"]');
+            if (!container) {
+              const cands = Array.from(dlg.querySelectorAll('div,section,main,article'))
+                .filter(n => n.scrollHeight > n.clientHeight + 10);
+              container = cands.sort((a,b)=> (b.scrollHeight-b.clientHeight) - (a.scrollHeight-a.clientHeight))[0] || dlg;
+            }
+            let stableCount = 0;
+            let lastH = -1;
+            let guard = 0;
+            while (guard++ < 20 && stableCount < 3) {
+              try { container.scrollTop = container.scrollHeight; } catch {}
+              await new Promise(r => setTimeout(r, 350));
+              const h = container.scrollHeight;
+              if (h === lastH && (container.scrollTop + container.clientHeight >= h - 1)) stableCount++; else stableCount = 0;
+              lastH = h;
+            }
+          });
+
+          // Extract from dialog DOM
+          let likers = await page.evaluate(() => {
+            const root = (document.querySelector('div[role="dialog"]') || document);
+            const out = [];
+            const seen = new Set();
+            function toAbs(href) {
+              try { return new URL(href, location.origin).href; } catch { return href || ''; }
+            }
+            function looksLikeProfile(url) {
+              const u = (url || '').toLowerCase();
+              if (!u) return false;
+              if (u.includes('/ufi/') || u.includes('/browser/') || u.includes('/reactions') || u.includes('/events/')) return false;
+              if (u.includes('/groups/') || u.includes('/pages/') || u.includes('/help/')) return false;
+              return (
+                u.includes('/profile.php?') ||
+                u.includes('/people/') ||
+                (/^https?:\/\/[^/]+\/[a-z0-9_.-]+\/?(\?.*)?$/i.test(u) && !u.endsWith('/photo.php'))
+              );
+            }
+            const items = Array.from(root.querySelectorAll('[role="listitem"], a[role="link"], a[href]'));
+            for (const node of items) {
+              const a = node.tagName === 'A' ? node : node.querySelector('a[href]');
+              if (!a) continue;
+              const hrefAbs = toAbs(a.getAttribute('href'));
+              if (!looksLikeProfile(hrefAbs)) continue;
+              let name = '';
+              const nameNode = node.querySelector('strong, span, a[role="link"], a[href]');
+              if (nameNode) name = (nameNode.textContent || '').trim();
+              if (!name) name = (a.textContent || '').trim();
+              if (!seen.has(hrefAbs)) { seen.add(hrefAbs); out.push({ name, profileUrl: hrefAbs }); }
+            }
+            return out;
+          });
+
+          // If suspiciously low, supplement via Variant 5 pagination
+          const MIN_DIALOG_COUNT = 30;
+          if (!Array.isArray(likers)) likers = [];
+          if (likers.length < MIN_DIALOG_COUNT) {
+            try {
+              const href = await page.evaluate((cid) => {
+                const root = document.querySelector(`div[data-commentid="${cid}"]`) || document;
+                if (!root) return null;
+                const a = root.querySelector('a[href*="/ufi/reaction"][href*="profile/browser"]');
+                return a ? a.href : null;
+              }, numericId);
+
+              if (href) {
+                const p2 = await page.browser().newPage();
+                await p2.setJavaScriptEnabled(false);
+                await p2.setCookie(...await page.cookies());
+                const collected = [];
+                const seen = new Set(likers.map(e => e.profileUrl));
+                let nextUrl = href;
+                let guard = 0;
+                while (nextUrl && guard++ < 50) {
+                  await p2.goto(nextUrl, { waitUntil: 'networkidle2', timeout: 20000 });
+                  const { entries, next } = await p2.evaluate(() => {
+                    function abs(u){try{return new URL(u, location.origin).href;}catch{return u;}}
+                    const out = [];
+                    const anchors = Array.from(document.querySelectorAll('a[href][data-hovercard], a[href][data-lynx-mode]'));
+                    for (const a of anchors) {
+                      const url = abs(a.getAttribute('href'));
+                      const name = (a.innerText || '').trim();
+                      if (url && name) out.push({ name, profileUrl: url });
+                    }
+                    let nextHref = null;
+                    const more = document.querySelector('#m_more_item a[href], a[rel="next"]');
+                    if (more) nextHref = abs(more.getAttribute('href'));
+                    return { entries: out, next: nextHref };
+                  });
+                  for (const e of entries) { if (!seen.has(e.profileUrl)) { seen.add(e.profileUrl); collected.push(e); } }
+                  nextUrl = next;
+                }
+                await p2.close();
+                if (collected.length) {
+                  likers = likers.concat(collected);
+                }
+              }
+            } catch {}
+          }
+
+          if (Array.isArray(likers) && likers.length) {
+            likersJsonPath = path.join(dir, `${sanitize(commentId)}.likers.json`);
+            try { fs.writeFileSync(likersJsonPath, JSON.stringify({ postId, commentId, count: likers.length, likers }, null, 2)); } catch {}
+            console.log('[likes] likers extracted (dialog bottom-stable', likers.length < MIN_DIALOG_COUNT ? '+ supplemented v5' : '', ')', { count: likers.length, file: likersJsonPath });
+          }
+        } catch {}
+      }
+
       const overlayText = addCounterOverlay ? `Namen gesichtet: ${seenKeys.size}` : null;
       const ok = await this.stitchVertical(buffers, filePath, overlapPx, overlayText);
       if (!ok) throw new Error('Stitching fehlgeschlagen.');
-      return filePath;
+      return { screenshotPath: filePath, likersJsonPath };
     } finally {
       await page.close().catch(() => {});
     }
   }
 
   async openLikesDialogForComment(page, numericId, snippetText) {
+    let scopeEl = null;
+    const POINTER_STYLE_ID = '__cy_isolate_ptr__';
+
     try {
-      const handle = numericId ? await this.findCommentContainer(page, numericId) : (snippetText ? await this.findContainerBySnippet(page, snippetText) : null);
-      const opened = await page.evaluate(async (el) => {
-        const scope = el || document;
-        const debug = { stage: 'scan', tried: 0, matched: 0 };
-        // Common selectors/texts for likes link/button
-        const texts = ['likes', 'gefällt', 'gef 4llt', 'reaktionen', 'reactions', 'people who reacted', 'personen die reagiert', 'personen reagiert'];
+      scopeEl = numericId ? await this.findCommentContainer(page, numericId) : (snippetText ? await this.findContainerBySnippet(page, snippetText) : null);
 
-        function collectCandidates(root) {
-          const arr = [];
-          const nodes = root.querySelectorAll('a,button,div[role="button"],span[role="button"],div[aria-label],span[aria-label]');
-          nodes.forEach((n) => arr.push(n));
-          return arr;
-        }
+      if (!scopeEl) return false;
 
-        const near = collectCandidates(scope);
-        const global = collectCandidates(document);
-        const all = [...near, ...global];
-        debug.tried = all.length;
+      // Variant 1: pointer-events isolation – make only the target container clickable
+      await page.evaluate((el, styleId) => {
+        // remove old style if any
+        const prev = document.getElementById(styleId);
+        if (prev) prev.remove();
 
-        // Score candidates: prefer ones with matching text/aria or href, and closest to comment container
-        const centerY = (el ? (el.getBoundingClientRect().top + el.getBoundingClientRect().bottom) / 2 : (window.innerHeight/2));
-        let best = null; let bestScore = -1;
-        for (const cand of all) {
-          const text = ((cand.innerText || '') + ' ' + (cand.getAttribute('aria-label') || '')).toLowerCase();
-          const href = (cand.getAttribute('href') || '').toLowerCase();
-          const rect = cand.getBoundingClientRect();
-          const distance = Math.abs(((rect.top + rect.bottom) / 2) - centerY);
-          let score = 0;
-          if (texts.some(x => text.includes(x))) score += 6;
-          if (/reaction|ufi|browser|profile\/browser/.test(href)) score += 4;
-          if (/\d/.test(text)) score += 1; // numbers often part of likes count
-          // clickable heuristic
-          if (cand.tagName === 'A' || cand.tagName === 'BUTTON' || cand.getAttribute('role') === 'button') score += 2;
-          // closer is better
-          score += Math.max(0, 3 - Math.min(3, Math.round(distance / 200)));
-          if (score > bestScore) { bestScore = score; best = cand; }
+        // give container a unique id
+        el.setAttribute('id', '__cy_scope__');
+
+        const st = document.createElement('style');
+        st.id = styleId;
+        st.textContent = `*{pointer-events:none!important;} #__cy_scope__, #__cy_scope__ *{pointer-events:auto!important;}`;
+        document.head.appendChild(st);
+      }, scopeEl, POINTER_STYLE_ID);
+
+      // Try to click the likes button inside the isolated scope (reuse old heuristics simplified)
+      const likeBtn = await scopeEl.$('a[href*="/ufi/reaction"], div[role="button"][aria-label*="Reaktion" i], div[role="button"][aria-label*="reagiert" i]');
+      if (!likeBtn) throw new Error('Like-Button nicht gefunden');
+      const bb = await likeBtn.boundingBox();
+      if (!bb) throw new Error('BoundingBox leer');
+      await page.mouse.move(bb.x + bb.width / 2, bb.y + bb.height / 2);
+      await page.mouse.click(bb.x + bb.width / 2, bb.y + bb.height / 2);
+
+      // Warten bis Dialog sichtbar
+      await page.waitForSelector('div[role="dialog"], div[aria-modal="true"]', { timeout: 4000 });
+
+      // Variant 3: Validierung – prüfen, ob der Dialog wirklich zum Zielkommentar gehört
+      const isCorrect = await page.evaluate((cid, snippet) => {
+        const dlg = document.querySelector('div[role="dialog"], div[aria-modal="true"]');
+        if (!dlg) return false;
+        // Prüfe auf Link mit comment_id
+        if (cid) {
+          if (dlg.querySelector(`a[href*="comment_id=${cid}"]`)) return true;
         }
-        debug.matched = bestScore;
-        if (best) {
-          try {
-            best.scrollIntoView({ block: 'center' });
-            // simulate robust click
-            const ev1 = new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window });
-            const ev2 = new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window });
-            best.dispatchEvent(ev1);
-            best.dispatchEvent(ev2);
-            best.click();
-            return { ok: true, debug };
-          } catch {
-            return { ok: false, debug };
-          }
+        if (snippet && snippet.length > 10) {
+          const txt = dlg.innerText || '';
+          return txt.includes(snippet.slice(0, 20));
         }
-        return { ok: false, debug };
-      }, handle);
-      try { if (handle) await handle.dispose(); } catch {}
-      if (!opened || (opened && opened.ok === false)) {
-        console.log('[likes] open failed', opened?.debug || opened);
+        return false;
+      }, numericId, snippetText);
+
+      if (!isCorrect) {
+        // falscher Dialog – schließen und Fehler zurückgeben
+        await page.keyboard.press('Escape').catch(() => {});
         return false;
       }
-      console.log('[likes] open ok', opened?.debug || opened);
-      // wait for dialog; also check for profile browser overlays
-      await page.waitForSelector('div[role="dialog"], [data-pagelet*="root" i] div[role="dialog"], div[aria-modal="true"]', { timeout: 5000 });
-      // if dialog didn't appear, try keyboard open on focused element (sometimes opens reactions)
-      const hasDlg = await page.$('div[role="dialog"], div[aria-modal="true"]');
-      if (!hasDlg) {
-        await page.keyboard.press('Enter');
-        await page.waitForTimeout(300);
-        await page.waitForSelector('div[role="dialog"], div[aria-modal="true"]', { timeout: 4000 });
-      }
-      await page.waitForTimeout(400);
+
       return true;
     } catch {
       return false;
+    } finally {
+      // clean up isolation style
+      await page.evaluate((styleId) => {
+        const st = document.getElementById(styleId);
+        if (st) st.remove();
+        const scoped = document.getElementById('__cy_scope__');
+        if (scoped) scoped.removeAttribute('id');
+      }, POINTER_STYLE_ID).catch(() => {});
+
+      try { if (scopeEl) await scopeEl.dispose(); } catch {}
     }
   }
 
@@ -1342,6 +1519,284 @@ class BrowserService {
       await this.browser.close();
       this.browser = null;
     }
+  }
+
+  async extractAllLikersMobile(commentUrl, postId, commentId) {
+    if (!this.browser) await this.initBrowser(false);
+    const page = await this.browser.newPage();
+    // Ensure we are logged in before attempting extraction
+    try {
+      const loggedIn = await this.hasCookieNamed(page, 'c_user');
+      if (!loggedIn) {
+        const login = await this.browser.newPage();
+        try {
+          await login.setViewport({ width: 1366, height: 900, deviceScaleFactor: 1 });
+          const desktopUA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+          await login.setUserAgent(desktopUA);
+          await login.setExtraHTTPHeaders({ 'accept-language': 'de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7' });
+          await login.goto('https://www.facebook.com/login', { waitUntil: 'domcontentloaded', timeout: 60_000 });
+          await this.acceptCookieBanner(login);
+          // Wait until user completes login (c_user cookie appears)
+          const start = Date.now();
+          const maxMs = 5 * 60 * 1000; // 5 minutes
+          while (Date.now() - start < maxMs) {
+            const ok = await this.hasCookieNamed(login, 'c_user');
+            if (ok) break;
+            await login.waitForTimeout(1500);
+          }
+          const ok = await this.hasCookieNamed(login, 'c_user');
+          if (!ok) throw new Error('Login nicht abgeschlossen (Timeout).');
+          // Persist cookies
+          await this.saveCookies();
+        } finally {
+          try { await login.close(); } catch {}
+        }
+      }
+    } catch {}
+    // Derive numeric/entity id from commentUrl or commentId
+    const deriveId = () => {
+      try {
+        if (commentUrl) {
+          const u = new URL(commentUrl);
+          const cid = u.searchParams.get('comment_id') || u.searchParams.get('commentid') || u.searchParams.get('ft_ent_identifier');
+          if (cid) return cid;
+        }
+      } catch {}
+      const m = String(commentId || '').match(/\d{5,}/);
+      return m ? m[0] : String(commentId || '').trim();
+    };
+    const entId = deriveId();
+    if (!entId) throw new Error('Konnte ft_ent_identifier nicht bestimmen');
+
+    const baseUrl = `https://www.facebook.com/ufi/reaction/profile/browser/?ft_ent_identifier=${encodeURIComponent(entId)}&reaction_type=0`;
+
+    // Prepare a helper page for cookie-scoped operations on www
+    const p2 = await page.browser().newPage();
+    try {
+      await p2.setViewport({ width: 1366, height: 900, deviceScaleFactor: 1 });
+      await p2.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
+      await p2.setExtraHTTPHeaders({ 'accept-language': 'de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7' });
+      await p2.setJavaScriptEnabled(true);
+      await p2.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+      const allCookies = await (async () => {
+        try {
+          const client = await page.target().createCDPSession();
+          const res = await client.send('Network.getAllCookies');
+          return res.cookies || [];
+        } catch {
+          return await page.cookies().catch(() => []);
+        }
+      })();
+      if (Array.isArray(allCookies) && allCookies.length) {
+        const fbCookies = allCookies.filter(c => (c.domain || '').includes('facebook'));
+        if (fbCookies.length) await p2.setCookie(...fbCookies);
+      }
+    } catch {}
+
+    const collected = [];
+    const seen = new Set();
+    let nextUrl = null; // skip mobile path; go straight to desktop fallback below
+    let pages = 0;
+    while (nextUrl && pages < 100) {
+      pages++;
+      // Ensure we always hit the mobile host
+      const toMobile = (u) => {
+        try {
+          const url = new URL(u);
+          url.hostname = 'm.facebook.com';
+          return url.toString();
+        } catch { return u; }
+      };
+      nextUrl = toMobile(nextUrl);
+      await p2.goto(nextUrl, { waitUntil: 'networkidle2', timeout: 25000 });
+      // If we landed on unsupported/JS-required pages, try UA/host fallback
+      try {
+        const unsupported = await p2.evaluate(() => /Facebook is not available on this browser/i.test(document.body.innerText || ''));
+        if (unsupported) {
+          // Switch to iPhone Safari UA and retry
+          try {
+            const iosUA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1';
+            navigator.__defineGetter__ && navigator.__defineGetter__('userAgent', () => iosUA);
+          } catch {}
+          await p2.setUserAgent('Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1');
+          const retry = toMobile(nextUrl);
+          await p2.goto(retry, { waitUntil: 'networkidle2', timeout: 25000 });
+        }
+      } catch {}
+      // Handle possible interstitials/cookie prompts on mobile before parsing
+      try {
+        await this.acceptCookieBanner(p2);
+        await p2.evaluate(() => {
+          function clickFirstMatching(selectors, texts) {
+            const nodes = [];
+            selectors.forEach(sel => document.querySelectorAll(sel).forEach(n => nodes.push(n)));
+            for (const n of nodes) {
+              const t = ((n.innerText || n.textContent || '') + ' ' + (n.getAttribute('aria-label') || '')).toLowerCase();
+              if (texts.some(x => t.includes(x))) {
+                try { n.click(); return true; } catch {}
+              }
+            }
+            return false;
+          }
+          // Common interstitial actions
+          const ok = clickFirstMatching(
+            ['button', 'a[role="button"]', 'a[href]'],
+            ['weiter', 'fortfahren', 'continue', 'okay', 'ok', 'zustimmen', 'accept', 'erlauben', 'später', 'not now']
+          );
+          if (!ok) {
+            // Try to expand content blocks if collapsed
+            clickFirstMatching(['button', 'a'], ['mehr', 'more']);
+          }
+        });
+        await p2.waitForTimeout(500);
+      } catch {}
+      const { entries, next } = await p2.evaluate(() => {
+        function abs(u){ try { return new URL(u, location.origin).href; } catch { return u; } }
+        const out = [];
+        // Generic anchors that usually wrap profile links on m.facebook.com
+        const anchors = Array.from(document.querySelectorAll('a[href][data-lynx-mode], a[href][ajaxify], a[href][role="link"]'));
+        for (const a of anchors) {
+          const url = abs(a.getAttribute('href'));
+          const name = (a.innerText || '').trim();
+          if (!url || !name) continue;
+          // Filter likely profile URLs
+          const u = url.toLowerCase();
+          if (u.includes('/ufi/') || u.includes('/reactions') || u.includes('/browser/') && !u.includes('/profile')) continue;
+          if (u.includes('/events/') || u.includes('/groups/') || u.includes('/pages/') || u.includes('/help/')) continue;
+          out.push({ name, profileUrl: url });
+        }
+        // find next link
+        let nextHref = null;
+        const more = document.querySelector('#m_more_item a[href], a[rel="next"]');
+        if (more) nextHref = abs(more.getAttribute('href'));
+        return { entries: out, next: nextHref };
+      });
+      for (const e of entries) {
+        if (!seen.has(e.profileUrl)) { seen.add(e.profileUrl); collected.push(e); }
+      }
+      nextUrl = next;
+    }
+
+    // Fallback: desktop reaction browser with JS enabled + infinite scroll
+    if (collected.length < 30) {
+      try {
+        const p3 = await page.browser().newPage();
+        await p3.setJavaScriptEnabled(true);
+        await p3.setViewport({ width: 1366, height: 900, deviceScaleFactor: 1 });
+        await p3.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
+        await p3.setExtraHTTPHeaders({ 'accept-language': 'de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7' });
+        // Ensure cookies are present for www.facebook.com
+        try {
+          await p3.goto('https://www.facebook.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+          await this.acceptCookieBanner(p3);
+        } catch {}
+        const desktopUrl = `https://www.facebook.com/ufi/reaction/profile/browser/?ft_ent_identifier=${encodeURIComponent(entId)}&reaction_type=0`;
+        await p3.goto(desktopUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+        console.log('[likes][extract-all][desktop] opened', desktopUrl);
+        // Click visible "Mehr anzeigen" / "See more" buttons repeatedly (with progress logging)
+        let totalMoreClicks = 0;
+        for (let i = 0; i < 40; i++) {
+          const clicked = await p3.evaluate(() => {
+            function visible(n){ const r=n.getBoundingClientRect(); const cs=getComputedStyle(n); return r.width>0&&r.height>0&&cs.visibility!=='hidden'&&cs.display!=='none'; }
+            const texts = ['mehr anzeigen','see more','mehr reaktionen','more reactions','more'];
+            const nodes = Array.from(document.querySelectorAll('a,button,div[role="button"],span[role="button"]')).filter(visible);
+            for (const n of nodes) {
+              const t = ((n.innerText || n.textContent || '') + ' ' + (n.getAttribute('aria-label') || '')).toLowerCase();
+              if (texts.some(x => t.includes(x))) {
+                n.scrollIntoView({ block: 'center' });
+                try { n.click(); return true; } catch {}
+              }
+            }
+            return false;
+          });
+          if (!clicked) break;
+          totalMoreClicks++;
+          console.log('[likes][extract-all][desktop] clicked more button', totalMoreClicks);
+          await p3.waitForTimeout(900);
+          // Nudge scroll to reveal next button set
+          try { await p3.evaluate(() => window.scrollBy(0, Math.round((window.innerHeight||900)*0.7))); } catch {}
+        }
+        // Scroll to bottom until stable
+        try {
+          let stable = 0; let lastH = -1; let guard = 0;
+          while (guard++ < 90 && stable < 3) {
+            const h = await p3.evaluate(() => document.scrollingElement ? document.scrollingElement.scrollHeight : document.body.scrollHeight);
+            if (h === lastH) stable++; else stable = 0;
+            lastH = h;
+            await p3.evaluate(() => window.scrollTo(0, (document.scrollingElement || document.documentElement).scrollHeight));
+            await p3.waitForTimeout(700);
+            // Click any newly appeared "Mehr anzeigen" while paging
+            const moreClicked = await p3.evaluate(() => {
+              function visible(n){ const r=n.getBoundingClientRect(); const cs=getComputedStyle(n); return r.width>0&&r.height>0&&cs.visibility!=='hidden'&&cs.display!=='none'; }
+              const texts = ['mehr anzeigen','see more','mehr reaktionen','more reactions','more'];
+              const nodes = Array.from(document.querySelectorAll('a,button,div[role="button"],span[role="button"]')).filter(visible);
+              for (const n of nodes) {
+                const t = ((n.innerText || n.textContent || '') + ' ' + (n.getAttribute('aria-label') || '')).toLowerCase();
+                if (texts.some(x => t.includes(x))) { try { n.click(); return true; } catch {} }
+              }
+              return false;
+            });
+            if (moreClicked) { console.log('[likes][extract-all][desktop] clicked more during scroll'); stable = 0; }
+          }
+        } catch {}
+        // Extract anchors with multiple selector strategies and log counts
+        const { listA, listB } = await p3.evaluate(() => {
+          function abs(u){ try { return new URL(u, location.origin).href; } catch { return u; } }
+          const outA = [];
+          const selA = 'a[role="link"][href], a[href]';
+          const anchorsA = Array.from(document.querySelectorAll(selA));
+          for (const a of anchorsA) {
+            const url = abs(a.getAttribute('href'));
+            const name = (a.innerText || '').trim();
+            if (!url || !name) continue;
+            const u = url.toLowerCase();
+            if (u.includes('/ufi/') || u.includes('/reactions') || u.includes('/browser/') || u.includes('/events/') || u.includes('/help/')) continue;
+            if (u.includes('/groups/') || u.includes('/pages/')) continue;
+            const looksProfile = u.includes('/profile.php?') || u.includes('/people/') || /^https?:\/\/www\.facebook\.com\/[a-z0-9_.-]+\/?(\?.*)?$/i.test(url);
+            if (!looksProfile) continue;
+            outA.push({ name, profileUrl: url });
+          }
+          // Strategy B: find list items, then inner primary link
+          const outB = [];
+          const items = Array.from(document.querySelectorAll('[role="listitem"], [role="article"], li'));
+          for (const it of items) {
+            const a = it.querySelector('a[href]');
+            if (!a) continue;
+            const url = abs(a.getAttribute('href'));
+            const name = (a.innerText || a.textContent || '').trim();
+            if (!url || !name) continue;
+            outB.push({ name, profileUrl: url });
+          }
+          return { listA: outA, listB: outB };
+        });
+        console.log('[likes][extract-all][desktop] extracted preliminary', { A: listA.length, B: listB.length });
+        const merged = [...listA, ...listB];
+        for (const e of merged) { if (e && e.profileUrl && !seen.has(e.profileUrl)) { seen.add(e.profileUrl); collected.push(e); } }
+        console.log('[likes][extract-all][desktop] total collected after desktop', collected.length);
+        if (collected.length < 1) {
+          // Write debug artifacts to help diagnose
+          const userData = app.getPath('userData');
+          const dir = path.join(userData, 'screenshots_likes', postId);
+          fs.ensureDirSync(dir);
+          const html = await p3.content().catch(() => '');
+          try { fs.writeFileSync(path.join(dir, `${sanitize(commentId)}.likers.debug.html`), html || ''); } catch {}
+          try { await p3.screenshot({ path: path.join(dir, `${sanitize(commentId)}.likers.debug.png`) }); } catch {}
+          console.log('[likes][extract-all][desktop] debug artifacts written');
+        }
+        try { await p3.close(); } catch {}
+      } catch {}
+    }
+
+    await p2.close();
+    try { await page.close(); } catch {}
+
+    const userData = app.getPath('userData');
+    const dir = path.join(userData, 'screenshots_likes', postId);
+    fs.ensureDirSync(dir);
+    const likersJsonPath = path.join(dir, `${sanitize(commentId)}.likers.all.json`);
+    fs.writeFileSync(likersJsonPath, JSON.stringify({ postId, commentId, ft_ent_identifier: entId, count: collected.length, source: 'desktop', pages, likers: collected }, null, 2));
+    console.log('[likes] extract-all done', { id: commentId, count: collected.length, pages });
+    return { likersJsonPath, count: collected.length, likers: collected };
   }
 }
 

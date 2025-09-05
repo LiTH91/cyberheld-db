@@ -493,11 +493,27 @@ export default function PostCommentsPage() {
                                   onClick={async () => {
                                     const meta = JSON.parse(c.metadata);
                                     const snippet = typeof meta?.text === 'string' ? meta.text.slice(0, 160) : '';
-                                    const res = await window.electronAPI.takeLikesScreenshot({ postId, commentUrl: c.url, commentId: c.id, snippet });
+                                    const res = await window.electronAPI.takeLikesScreenshot({ postId, commentUrl: c.url, commentId: c.id, snippet, extractLikers: true });
                                     if (!res?.success) alert('Likes-Screenshot fehlgeschlagen: ' + (res?.error || 'Unbekannt'));
+                                    if (res?.likersJsonPath) {
+                                      console.log('Likers JSON gespeichert:', res.likersJsonPath);
+                                    }
                                   }}
                                 >
                                   Likes-Screenshot
+                                </button>
+                                <button
+                                  className="btn-secondary text-sm"
+                                  onClick={async () => {
+                                    const res = await window.electronAPI.extractAllLikers({ postId, commentUrl: c.url, commentId: c.id });
+                                    if (!res?.success) {
+                                      alert('Extract-All fehlgeschlagen: ' + (res?.error || 'Unbekannt'));
+                                      return;
+                                    }
+                                    console.log('Extract-All JSON:', res.likersJsonPath, 'count=', res.count);
+                                  }}
+                                >
+                                  Likes sammeln (alle)
                                 </button>
                                 <button
                                   className="btn-secondary text-sm"

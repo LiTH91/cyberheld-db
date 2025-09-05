@@ -490,19 +490,38 @@ class CyberheldApp {
         const options = {
           addCounterOverlay: (typeof req.addCounterOverlay === 'boolean') ? !!req.addCounterOverlay : !!s.likesAddCounterOverlay,
           secondBottomPass: (typeof req.secondBottomPass === 'boolean') ? !!req.secondBottomPass : !!s.likesSecondBottomPass,
+          extractLikers: !!req.extractLikers,
         };
-        const filePath = await this.browserService.takeLikesScreenshot(
+        const result = await this.browserService.takeLikesScreenshot(
           req.commentUrl,
           req.postId,
           req.commentId || req.id || req.comment_id || req,
           req.snippet,
           options
         );
-        await this.dbService.updateCommentLikesScreenshot(req.commentId || req.id, filePath);
-        this.audit.write('likes_screenshot', { id: req.commentId || req.id, postId: req.postId, path: filePath });
-        return { success: true, screenshotPath: filePath };
+        const filePath = typeof result === 'string' ? result : result?.screenshotPath;
+        if (filePath) {
+          await this.dbService.updateCommentLikesScreenshot(req.commentId || req.id, filePath);
+        }
+        this.audit.write('likes_screenshot', { id: req.commentId || req.id, postId: req.postId, path: filePath || null, likers: result?.likersJsonPath || null });
+        return { success: true, screenshotPath: filePath || null, likersJsonPath: result?.likersJsonPath || null };
       } catch (error) {
         this.logger.warn('Likes screenshot failed', { error: error?.message || String(error), id: req.commentId || req.id });
+        return { success: false, error: error?.message || String(error) };
+      }
+    });
+
+    ipcMain.handle('likes:extract-all', async (_evt, req) => {
+      try {
+        const result = await this.browserService.extractAllLikersMobile(
+          req.commentUrl,
+          req.postId,
+          req.commentId || req.id || req.comment_id || req
+        );
+        this.audit.write('likes_extract_all', { id: req.commentId || req.id, postId: req.postId, path: result?.likersJsonPath || null, count: result?.count || 0 });
+        return { success: true, ...result };
+      } catch (error) {
+        this.logger.warn('Likes extract-all failed', { error: error?.message || String(error) });
         return { success: false, error: error?.message || String(error) };
       }
     });

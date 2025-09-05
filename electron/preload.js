@@ -64,4 +64,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Likes screenshots
   takeLikesScreenshot: (request) => ipcRenderer.invoke('likes:take', request),
   openLikesFolder: (postId) => ipcRenderer.invoke('likes:open-folder', { postId }),
+  // Likes extract-all (mobile)
+  extractAllLikers: (request) => ipcRenderer.invoke('likes:extract-all', request),
 });
