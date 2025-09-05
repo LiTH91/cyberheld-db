@@ -158,7 +158,7 @@ class BrowserService {
     }
   }
 
-  async takeLikesScreenshot(commentUrl, postId, commentId, snippetText) {
+  async takeLikesScreenshot(commentUrl, postId, commentId, snippetText, options = {}) {
     if (!this.browser) throw new Error('Browser nicht initialisiert.');
     const page = await this.browser.newPage();
     // Set a stable viewport for modal capture
@@ -270,6 +270,9 @@ class BrowserService {
       // Stitching approach: capture the list/feed (or scroll container) itself after each scroll step
       const buffers = [];
       const overlapPx = 60;
+      const addCounterOverlay = !!options.addCounterOverlay;
+      const secondBottomPass = !!options.secondBottomPass;
+      const seenKeys = new Set();
 
       // Ensure focus so PageDown/ArrowDown affect the list
       try { await page.evaluate((el)=>{ el.tabIndex = -1; el.focus(); }, scrollEl); } catch {}
@@ -312,6 +315,27 @@ class BrowserService {
         if (hash !== lastHash) buffers.push(buf); else console.log('[likes] skipped duplicate slice');
         if (hash === lastHash) repeats++; else repeats = 0;
         lastHash = hash;
+
+        // collect visible identity keys (best effort)
+        try {
+          const keys = await page.evaluate((el) => {
+            const out = [];
+            const rows = Array.from(el.querySelectorAll('[role="listitem"], [role="article"], a[role="link"], a[href*="profile" i]'));
+            for (const r of rows) {
+              const link = r.querySelector('a[href]');
+              const href = (link && link.getAttribute('href')) || '';
+              let name = '';
+              // Try common name containers
+              const nameNode = r.querySelector('strong, span, a[role="link"], a[href*="profile" i]');
+              if (nameNode) name = (nameNode.textContent || '').trim();
+              if (!name) name = (r.textContent || '').trim().split('\n')[0];
+              const key = (href + '|' + name).toLowerCase().slice(0, 300);
+              if (key && key.length > 1) out.push(key);
+            }
+            return out;
+          }, scrollEl);
+          for (const k of (keys || [])) { seenKeys.add(k); }
+        } catch {}
 
         // advance
         const before = await page.evaluate((el)=>({ top: el.scrollTop, client: el.clientHeight, scroll: el.scrollHeight }), scrollEl);
@@ -360,6 +384,55 @@ class BrowserService {
         if (repeats >= 3) { console.log('[likes] repeated identical slices – stop'); break; }
       }
 
+      // Optional: perform a "second bottom pass" to encourage lazy names loading near the end
+      if (secondBottomPass) {
+        try {
+          console.log('[likes] second-bottom-pass begin');
+          for (let j = 0; j < 3; j++) {
+            // Jump to bottom
+            await page.evaluate((el) => { el.scrollTop = el.scrollHeight; }, scrollEl);
+            await page.waitForTimeout(250);
+            // Nudge up slightly then back down to trigger additional loads
+            await page.evaluate((el) => { el.scrollTop = Math.max(0, el.scrollTop - Math.floor(el.clientHeight * 0.5)); }, scrollEl);
+            await page.waitForTimeout(300);
+            await page.evaluate((el) => { el.scrollTop = el.scrollHeight; }, scrollEl);
+            await page.waitForTimeout(300);
+
+            // Capture one more slice if new
+            const buf = await shotEl.screenshot({ type: 'png' });
+            const hash = crypto.createHash('sha1').update(buf).digest('hex');
+            if (hash !== lastHash) {
+              buffers.push(buf);
+              lastHash = hash;
+              console.log('[likes] second-bottom-pass captured extra slice');
+            } else {
+              console.log('[likes] second-bottom-pass duplicate slice skipped');
+            }
+
+            // collect keys again
+            try {
+              const keys = await page.evaluate((el) => {
+                const out = [];
+                const rows = Array.from(el.querySelectorAll('[role="listitem"], [role="article"], a[role="link"], a[href*="profile" i]'));
+                for (const r of rows) {
+                  const link = r.querySelector('a[href]');
+                  const href = (link && link.getAttribute('href')) || '';
+                  let name = '';
+                  const nameNode = r.querySelector('strong, span, a[role="link"], a[href*="profile" i]');
+                  if (nameNode) name = (nameNode.textContent || '').trim();
+                  if (!name) name = (r.textContent || '').trim().split('\n')[0];
+                  const key = (href + '|' + name).toLowerCase().slice(0, 300);
+                  if (key && key.length > 1) out.push(key);
+                }
+                return out;
+              }, scrollEl);
+              for (const k of (keys || [])) { seenKeys.add(k); }
+            } catch {}
+          }
+          console.log('[likes] second-bottom-pass end');
+        } catch {}
+      }
+
       if (!buffers.length) throw new Error('Keine Slices aufgenommen.');
 
       // Stitch vertically into final image
@@ -367,7 +440,8 @@ class BrowserService {
       const dir = path.join(userData, 'screenshots_likes', postId);
       fs.ensureDirSync(dir);
       const filePath = path.join(dir, `${sanitize(commentId)}.png`);
-      const ok = await this.stitchVertical(buffers, filePath, overlapPx);
+      const overlayText = addCounterOverlay ? `Namen gesichtet: ${seenKeys.size}` : null;
+      const ok = await this.stitchVertical(buffers, filePath, overlapPx, overlayText);
       if (!ok) throw new Error('Stitching fehlgeschlagen.');
       return filePath;
     } finally {
@@ -509,13 +583,13 @@ class BrowserService {
     }
   }
 
-  async stitchVertical(buffers, outPath, overlapPx = 0) {
+  async stitchVertical(buffers, outPath, overlapPx = 0, overlayText = null) {
     try {
       const page = await this.browser.newPage();
       try {
         await page.setContent('<html><head><meta charset="utf-8"/></head><body style="margin:0;padding:0;background:#fff"></body></html>');
         const dataUrls = buffers.map(b => `data:image/png;base64,${b.toString('base64')}`);
-        const stitched = await page.evaluate(async (srcs, overlap) => {
+        const stitched = await page.evaluate(async (srcs, overlap, textOverlay) => {
           function load(src) {
             return new Promise((resolve, reject) => {
               const img = new Image();
@@ -545,8 +619,23 @@ class BrowserService {
               y += sh;
             }
           }
+          if (textOverlay && typeof textOverlay === 'string' && textOverlay.length > 0) {
+            ctx.save();
+            const paddingX = 10, paddingY = 6;
+            ctx.font = '16px sans-serif';
+            const metrics = ctx.measureText(textOverlay);
+            const bw = Math.ceil(metrics.width + paddingX * 2);
+            const bh = 28;
+            ctx.fillStyle = 'rgba(255,255,255,0.9)';
+            ctx.fillRect(8, 8, bw, bh);
+            ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+            ctx.strokeRect(8, 8, bw, bh);
+            ctx.fillStyle = '#111';
+            ctx.fillText(textOverlay, 8 + paddingX, 8 + bh - Math.floor((bh - 16) / 2) - 6);
+            ctx.restore();
+          }
           return canvas.toDataURL('image/png');
-        }, dataUrls, overlapPx);
+        }, dataUrls, overlapPx, overlayText);
 
         // Write the stitched image
         const base64 = stitched.split(',')[1];

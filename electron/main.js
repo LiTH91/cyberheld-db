@@ -85,32 +85,44 @@ class CyberheldApp {
     const loaded = await this.settingsService.loadSettings();
     await this.browserService.initBrowser(false);
 
-    const isDev = process.env.NODE_ENV === 'development';
-    
+    // Treat non-packaged app as development as well, regardless of NODE_ENV
+    const isDev = (!app.isPackaged) || process.env.NODE_ENV === 'development';
+
     if (isDev) {
-      // Try different ports that Next.js might use
+      // Try different ports that Next.js might use, with retries per port
       const ports = [3000, 3001, 3002];
       let loaded = false;
-      
       for (const port of ports) {
-        try {
-          await this.mainWindow.loadURL(`http://localhost:${port}`);
-          console.log(`Successfully connected to Next.js on port ${port}`);
-          loaded = true;
-          break;
-        } catch (error) {
-          console.log(`Port ${port} not available, trying next...`);
+        for (let attempt = 1; attempt <= 20; attempt++) {
+          try {
+            await this.mainWindow.loadURL(`http://localhost:${port}`);
+            console.log(`Connected to Next.js on port ${port} (attempt ${attempt})`);
+            loaded = true;
+            break;
+          } catch (error) {
+            console.log(`Port ${port} attempt ${attempt} failed, retrying...`);
+            await new Promise(r => setTimeout(r, 750));
+          }
         }
+        if (loaded) break;
       }
-      
+
       if (!loaded) {
-        console.error('Could not connect to Next.js development server');
-        this.mainWindow.loadFile(path.join(__dirname, '../dist/next/index.html'));
+        console.error('Could not connect to Next.js development server after retries');
+        // Show a minimal error page in dev instead of falling back to a non-existent dist export
+        const msg = encodeURIComponent('Dev server not reachable. Start it via "npm run dev:next" or run "npm run dev".');
+        await this.mainWindow.loadURL(`data:text/html,<html><body><h2>Next.js Dev Server nicht erreichbar</h2><p>${msg}</p></body></html>`);
       }
-      
+
       this.mainWindow.webContents.openDevTools();
     } else {
-      this.mainWindow.loadFile(path.join(__dirname, '../dist/next/index.html'));
+      const distIndex = path.join(__dirname, '../dist/next/index.html');
+      if (fs.existsSync(distIndex)) {
+        this.mainWindow.loadFile(distIndex);
+      } else {
+        const msg = encodeURIComponent('Produktions-Build nicht gefunden. Bitte ausführen: "npm run build" und optional "npx next export -o dist/next".');
+        await this.mainWindow.loadURL(`data:text/html,<html><body><h2>Build fehlt</h2><p>${msg}</p></body></html>`);
+      }
     }
 
     // Ensure we show even if 'ready-to-show' doesn't fire reliably
@@ -474,7 +486,18 @@ class CyberheldApp {
     // Likes screenshot for a single comment
     ipcMain.handle('likes:take', async (_evt, req) => {
       try {
-        const filePath = await this.browserService.takeLikesScreenshot(req.commentUrl, req.postId, req.commentId || req.id || req.comment_id || req, req.snippet);
+        const s = await this.settingsService.getSettings();
+        const options = {
+          addCounterOverlay: (typeof req.addCounterOverlay === 'boolean') ? !!req.addCounterOverlay : !!s.likesAddCounterOverlay,
+          secondBottomPass: (typeof req.secondBottomPass === 'boolean') ? !!req.secondBottomPass : !!s.likesSecondBottomPass,
+        };
+        const filePath = await this.browserService.takeLikesScreenshot(
+          req.commentUrl,
+          req.postId,
+          req.commentId || req.id || req.comment_id || req,
+          req.snippet,
+          options
+        );
         await this.dbService.updateCommentLikesScreenshot(req.commentId || req.id, filePath);
         this.audit.write('likes_screenshot', { id: req.commentId || req.id, postId: req.postId, path: filePath });
         return { success: true, screenshotPath: filePath };

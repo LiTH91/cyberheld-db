@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "concurrently \"npm run dev:next\" \"npm run dev:electron\"",
     "dev:next": "next dev",
-    "dev:electron": "wait-on http-get://localhost:3000 && set NODE_ENV=development && electron electron/main.js",
+    "dev:electron": "wait-on http-get://localhost:3000 && cross-env NODE_ENV=development electron electron/main.js",
     "build": "next build && npm run build:electron",
     "test": "jest",
     "test:watch": "jest --watch",

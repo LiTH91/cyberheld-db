@@ -50,18 +50,9 @@ export default function CommentDetailsModal({ open, onClose, comment }: Props) {
           </button>
         </div>
 
-        <div className="p-6 space-y-4">
+        <div className="p-6 space-y-4 max-h-[75vh] overflow-y-auto">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <DetailItem label="Kommentar-URL">
-              <a
-                href={comment.url}
-                target="_blank"
-                rel="noreferrer"
-                className="text-blue-600 inline-flex items-center gap-1"
-              >
-                Öffnen <ArrowTopRightOnSquareIcon className="h-4 w-4" />
-              </a>
-            </DetailItem>
+            {/* Kommentar-URL oben entfernt – unten gibt es eine gut sichtbare Roh-URL */}
 
             <DetailItem label="Datum">
               {meta?.date ? new Date(meta.date).toLocaleString('de-DE') : '—'}
@@ -118,6 +109,27 @@ export default function CommentDetailsModal({ open, onClose, comment }: Props) {
 
           <DetailItem label="AI: Begründung">
             {(comment as any).reasoning ? <div className="whitespace-pre-wrap text-gray-700">{(comment as any).reasoning}</div> : '—'}
+          </DetailItem>
+
+          {/* Redundante, gut sichtbare Roh-URL unten für einfaches Kopieren */}
+          <DetailItem label="Kommentar-URL (Roh)">
+            <div className="flex items-center gap-3">
+              <a
+                href={comment.url}
+                target="_blank"
+                rel="noreferrer"
+                className="text-blue-600 inline-flex items-center gap-1"
+              >
+                Öffnen <ArrowTopRightOnSquareIcon className="h-4 w-4" />
+              </a>
+              <input
+                type="text"
+                readOnly
+                value={comment.url}
+                onFocus={(e) => e.currentTarget.select()}
+                className="flex-1 min-w-0 border rounded px-2 py-1 text-sm text-gray-700 bg-gray-50"
+              />
+            </div>
           </DetailItem>
 
           <DetailItem label="Screenshot">

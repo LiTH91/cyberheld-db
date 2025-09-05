@@ -24,6 +24,7 @@ class AIService {
     const base =
       'You are a professional comment analyzer. Analyze Facebook comments. ' +
       'Classify whether a comment is negative. For negative comments, evaluate if it constitutes hatespeech, threatening, or offensive content. ' +
+      'Provide a concise reasoning of 1-2 sentences (max 300 characters). ' +
       'Return a JSON object strictly matching the schema: { "results": [ { "comment_id": string, "comment": string, "is_negative": boolean, "confidence_score": number, "reasoning": string } ] }. ' +
       'Only output JSON – no extra text.';
     const law = customLawText || '';
@@ -119,7 +120,7 @@ class AIService {
                         comment: { type: 'string' },
                         is_negative: { type: 'boolean' },
                         confidence_score: { type: 'number', minimum: 0, maximum: 1 },
-                        reasoning: { type: 'string' }
+                        reasoning: { type: 'string', maxLength: 300, description: '1-2 sentences, concise' }
                       },
                       required: ['comment_id', 'comment', 'is_negative', 'confidence_score', 'reasoning'],
                       additionalProperties: false
@@ -140,6 +141,12 @@ class AIService {
       }
 
       const mapped = this.parseResponseToResults(response, shortToReal);
+      // Safety clamp: ensure reasoning length <= 300 chars
+      for (const m of mapped) {
+        if (typeof m.reasoning === 'string' && m.reasoning.length > 300) {
+          m.reasoning = m.reasoning.slice(0, 300);
+        }
+      }
       all.push(...mapped);
     }
     return all;

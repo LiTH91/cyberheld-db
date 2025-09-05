@@ -10,6 +10,8 @@ const DEFAULT_SETTINGS = {
   slowMode: false,
   aiLegalContext: '',
   aiBatchSize: 100,
+  likesAddCounterOverlay: false,
+  likesSecondBottomPass: false,
 };
 
 class SettingsService {

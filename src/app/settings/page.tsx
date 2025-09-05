@@ -11,6 +11,8 @@ export default function SettingsPage() {
   const [fixedBackoff, setFixedBackoff] = useState<boolean>(false);
   const [aiLegalContext, setAiLegalContext] = useState<string>('');
   const [aiBatchSize, setAiBatchSize] = useState<number>(100);
+  const [likesAddCounterOverlay, setLikesAddCounterOverlay] = useState<boolean>(false);
+  const [likesSecondBottomPass, setLikesSecondBottomPass] = useState<boolean>(false);
 
   useEffect(() => {
     const load = async () => {
@@ -27,6 +29,8 @@ export default function SettingsPage() {
             setChromePath(s.chromePath || '');
             setAiLegalContext(s.aiLegalContext || '');
             setAiBatchSize(Number(s.aiBatchSize || 100));
+            setLikesAddCounterOverlay(!!s.likesAddCounterOverlay);
+            setLikesSecondBottomPass(!!s.likesSecondBottomPass);
           }
         }
       } catch {}
@@ -47,6 +51,8 @@ export default function SettingsPage() {
       chromePath: chromePath.trim(),
       aiLegalContext: aiLegalContext,
       aiBatchSize: Math.max(1, Math.min(200, Number(aiBatchSize) || 100)),
+      likesAddCounterOverlay,
+      likesSecondBottomPass,
     };
     const res = await window.electronAPI.saveSettings(payload);
     if (res?.success) {
@@ -89,6 +95,26 @@ export default function SettingsPage() {
         <label className="text-sm text-gray-600">CHROME_PATH</label>
         <input type="text" className="mt-1 w-full border rounded px-3 py-2" value={chromePath} onChange={(e) => setChromePath(e.target.value)} placeholder="C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" />
         <p className="text-xs text-gray-500">Zuletzt verwendet: {lastExec || '—'}</p>
+        <div className="flex gap-2">
+          <button className="btn-primary" onClick={handleSave}>Speichern</button>
+          <a href="/" className="btn-secondary">Zurück</a>
+        </div>
+      </div>
+
+      <div className="card space-y-3">
+        <h3 className="text-lg font-semibold text-gray-900">Likes-Screenshots</h3>
+        <div className="flex items-center gap-4">
+          <label className="inline-flex items-center gap-2">
+            <input type="checkbox" checked={likesAddCounterOverlay} onChange={(e) => setLikesAddCounterOverlay(e.target.checked)} />
+            Zähler-Overlay anzeigen (gesichtete Namen)
+          </label>
+        </div>
+        <div className="flex items-center gap-4">
+          <label className="inline-flex items-center gap-2">
+            <input type="checkbox" checked={likesSecondBottomPass} onChange={(e) => setLikesSecondBottomPass(e.target.checked)} />
+            Second-Bottom-Pass (Laden am Ende triggern)
+          </label>
+        </div>
         <div className="flex gap-2">
           <button className="btn-primary" onClick={handleSave}>Speichern</button>
           <a href="/" className="btn-secondary">Zurück</a>

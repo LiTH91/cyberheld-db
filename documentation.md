@@ -80,7 +80,9 @@ cyberheld-db/
     - Scrolling-Screenshot (Top→Kommentar): Vollseitenaufnahme und Zuschnitt vom Seitenanfang bis zum Ende des Ziel-Kommentars
     - Alternativ: gemeinsames Viewport-Fenster aus Post-Header und Kommentar
     - Fallback: FullPage-Screenshot, wenn der Bereich zu groß ist
-  - `takeLikesScreenshot(commentUrl, postId, commentId, snippetText)` – öffnet die Likes-Liste (Dialog), scrollt diese vollständig ab und erstellt einen zusammengesetzten Screenshot (vertikales Stitching)
+  - `takeLikesScreenshot(commentUrl, postId, commentId, snippetText, options)` – öffnet die Likes-Liste (Dialog), scrollt diese vollständig ab und erstellt einen zusammengesetzten Screenshot (vertikales Stitching). Optionen:
+    - `addCounterOverlay` (bool): Zeichnet ein Overlay „Namen gesichtet: N“ in das Endbild
+    - `secondBottomPass` (bool): Führt nach dem ersten Durchlauf einen zusätzlichen „Second-Bottom-Pass“ aus, um spätes Laden von Namen zu triggern
 - **electron/services/ExportService.js**: Export von JSON und PDF (eingebettete Screenshots, Checksum-Ausgabe)
 - **electron/preload.ts**: Preload Script für sichere IPC-Kommunikation
   - Exports: `window.electronAPI` Interface
@@ -135,6 +137,7 @@ cyberheld-db/
 ### AI-Service (electron/services/AIService.js)
 - Batching bis 100 Kommentare; Short-IDs (`c1..cN`) zur Tokenreduktion
 - Responses API mit JSON-Schema-Erzwingung; Retry bei transienten Fehlern
+- Reasoning: 1–2 Sätze, max. 300 Zeichen (Prompt + Schema; zusätzliche Laufzeitkappung)
 
 ### UI-Erweiterung
 - In `src/app/posts/[postId]/page.tsx`:
@@ -142,13 +145,14 @@ cyberheld-db/
   - Spalten: Negativ/Ja-Nein, Konfidenz, Begründung (gekürzt)
 - In `src/components/CommentDetailsModal.tsx`:
   - Anzeige: Negativ, Konfidenz, Modell, Zeitpunkt, Begründung
+  - Kommentar-URL: Link „Öffnen“ plus kopierbares Textfeld mit der Roh-URL
 
 ### Global API (window.electronAPI)
 - **window.electronAPI**: Globale Electron-API für Frontend
   - Definiert in: `electron/preload.ts`
   - Verwendet in: `src/app/page.tsx`
   - Methoden: `importJson()`, `getPosts()`, `getComments()`, `selectJsonFile()`
-  - Likes: `takeLikesScreenshot({ postId, commentUrl, commentId, snippet })`
+  - Likes: `takeLikesScreenshot({ postId, commentUrl, commentId, snippet, addCounterOverlay?, secondBottomPass? })`
 
 ## Dependencies
 
